@@ -644,14 +644,12 @@ const BRDGenerationEnterprise: React.FC<BRDGenerationEnterpriseProps> = ({
   
   const handleRestoreVersion = async (version: any) => {
     if (!version) return;
+    // Just show the version without creating a new version
     const updated = await updateBRD({
-      ...version,
-      version: (brd?.version || 0) + 1,
-      generatedAt: new Date().toISOString()
+      ...version
     });
     onUpdate(updated);
     setShowHistory(false);
-    await addActivityLog(`Restored BRD to version ${version.version}`, 'User');
   };
   
   const handleShare = () => {
@@ -1498,8 +1496,8 @@ const BRDGenerationEnterprise: React.FC<BRDGenerationEnterpriseProps> = ({
                                 
                                 {/* Sources count */}
                                 <span className="text-xs text-slate-400 font-medium flex items-center gap-1">
-                                  {section.sources.length > 0 ? (
-                                    <><Database className="h-3 w-3" /> {section.sources.length} sources</>
+                                  {(section.sources?.length || 0) > 0 ? (
+                                    <><Database className="h-3 w-3" /> {section.sources?.length} sources</>
                                   ) : (
                                     <><Sparkles className="h-3 w-3" /> AI Generated</>
                                   )}
@@ -1557,7 +1555,7 @@ const BRDGenerationEnterprise: React.FC<BRDGenerationEnterpriseProps> = ({
                                   </div>
                                 </div>
                                 
-                                {section.sources.length > 0 && (
+                                {(section.sources?.length || 0) > 0 && (
                                   <Tooltip content="View Sources">
                                     <button 
                                       onClick={() => setShowExplainability(showExplainability === section.id ? null : section.id)}
@@ -1673,11 +1671,11 @@ const BRDGenerationEnterprise: React.FC<BRDGenerationEnterpriseProps> = ({
                                         {conf}% Confidence
                                       </div>
                                     </div>
-                                    {section.sources.length > 0 ? (
+                                    {(section.sources?.length || 0) > 0 ? (
                                       <>
                                         <p className="text-sm text-slate-500 mb-4">This section was synthesized from the following verified sources:</p>
                                         <div className="flex flex-wrap gap-2">
-                                          {section.sources.map((source, i) => (
+                                          {(section.sources || []).map((source, i) => (
                                             <SourceBadge key={i} sourceName={source} />
                                           ))}
                                         </div>
@@ -2224,7 +2222,17 @@ const BRDGenerationEnterprise: React.FC<BRDGenerationEnterpriseProps> = ({
               className="relative w-full max-w-2xl bg-white rounded-3xl shadow-2xl overflow-hidden"
             >
               <div className="p-6 border-b border-slate-100 flex items-center justify-between">
-                <h3 className="text-xl font-bold text-slate-900">Version History</h3>
+                <div className="flex items-center gap-4">
+                  <h3 className="text-xl font-bold text-slate-900">Version History</h3>
+                  <Button 
+                    onClick={() => { setShowHistory(false); handleGenerate(); }}
+                    disabled={isGenerating}
+                    className="rounded-xl"
+                  >
+                    <RefreshCw className={`h-4 w-4 mr-2 ${isGenerating ? 'animate-spin' : ''}`} />
+                    Regenerate
+                  </Button>
+                </div>
                 <button onClick={() => setShowHistory(false)} className="p-2 hover:bg-slate-100 rounded-xl transition-colors">
                   <X className="h-5 w-5 text-slate-400" />
                 </button>
@@ -2267,9 +2275,9 @@ const BRDGenerationEnterprise: React.FC<BRDGenerationEnterpriseProps> = ({
                         <Button 
                           variant="outline" 
                           onClick={() => handleRestoreVersion(version)} 
-                          className="rounded-xl opacity-0 group-hover:opacity-100 transition-opacity"
+                          className="rounded-xl"
                         >
-                          Restore
+                          <Eye className="h-4 w-4 mr-2" /> View
                         </Button>
                       </div>
                     </div>

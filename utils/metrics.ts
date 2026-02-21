@@ -1,9 +1,20 @@
 /**
  * Real metrics calculation from actual project data.
  * No AI calls - purely data-driven calculations for cost efficiency.
+ * 
+ * Enhanced with TrustScoreEngine v2.0 for comprehensive confidence scoring.
  */
 
 import { ProjectState, Insight, Source, BRDSection, Task } from './db';
+import { 
+  TrustScoreEngine, 
+  TrustScoreResult, 
+  TrustFactor,
+  TrustWarning,
+  getTrustScoreEngine,
+  calculateProjectTrust,
+  getTrustScoreColor
+} from './TrustScoreEngine';
 
 export interface CalculatedMetrics {
   completeness: number;
@@ -16,6 +27,14 @@ export interface CalculatedMetrics {
     brdScore: number;
     tasksResolved: number;
   };
+}
+
+// Enhanced metrics interface with TrustScoreEngine data
+export interface EnhancedMetrics extends CalculatedMetrics {
+  trustScore: TrustScoreResult;
+  factors: TrustFactor[];
+  warnings: TrustWarning[];
+  recommendations: string[];
 }
 
 /**
@@ -90,42 +109,21 @@ export const calculateStakeholderCoverage = (project: ProjectState): number => {
  * - Insight confidence levels
  * - BRD section confidence
  * - Unresolved questions/conflicts
+ * 
+ * @deprecated For comprehensive analysis, use calculateEnhancedOverallConfidence
  */
 export const calculateOverallConfidence = (project: ProjectState): number => {
-  const insights = project.insights || [];
-  const sections = project.brd?.sections || [];
-  const tasks = project.tasks || [];
+  // Use TrustScoreEngine for the calculation
+  const trustResult = calculateProjectTrust(project);
+  return trustResult.finalScore;
+};
 
-  if (insights.length === 0 && sections.length === 0) {
-    return 15; // Minimal confidence with no data
-  }
-
-  let totalWeight = 0;
-  let weightedSum = 0;
-
-  // Insight confidence (weight: 40%)
-  if (insights.length > 0) {
-    const insightConfidenceMap = { high: 100, medium: 65, low: 30 };
-    const avgInsightConfidence = insights.reduce((sum, i) => 
-      sum + insightConfidenceMap[i.confidence], 0) / insights.length;
-    weightedSum += avgInsightConfidence * 0.4;
-    totalWeight += 0.4;
-  }
-
-  // BRD section confidence (weight: 40%)
-  if (sections.length > 0) {
-    const avgSectionConfidence = sections.reduce((sum, s) => sum + s.confidence * 100, 0) / sections.length;
-    weightedSum += avgSectionConfidence * 0.4;
-    totalWeight += 0.4;
-  }
-
-  // Penalty for unresolved issues (weight: 20%)
-  const conflictTasks = tasks.filter(t => t.type === 'conflict' || t.type === 'ambiguity');
-  const taskPenalty = Math.max(100 - (conflictTasks.length * 15), 20);
-  weightedSum += taskPenalty * 0.2;
-  totalWeight += 0.2;
-
-  return totalWeight > 0 ? Math.round(weightedSum / totalWeight) : 25;
+/**
+ * Calculate comprehensive overall confidence using TrustScoreEngine v2.0
+ * Returns full factor breakdown, warnings, and recommendations
+ */
+export const calculateEnhancedOverallConfidence = (project: ProjectState): TrustScoreResult => {
+  return calculateProjectTrust(project);
 };
 
 /**
@@ -178,3 +176,42 @@ export const formatMetricChange = (current: number, previous: number): {
   }
   return { value: `${diff}%`, trend: 'down', color: 'text-red-500' };
 };
+
+/**
+ * Calculate all enhanced metrics using TrustScoreEngine v2.0
+ */
+export const calculateEnhancedMetrics = (project: ProjectState): EnhancedMetrics => {
+  const basicMetrics = calculateAllMetrics(project);
+  const trustScore = calculateProjectTrust(project);
+  
+  return {
+    ...basicMetrics,
+    // Use TrustScoreEngine's confidence score
+    overallConfidence: trustScore.finalScore,
+    trustScore,
+    factors: trustScore.factors,
+    warnings: trustScore.warnings,
+    recommendations: trustScore.recommendations
+  };
+};
+
+/**
+ * Get insight-level trust scores for all insights in a project
+ */
+export const calculateInsightTrustScores = (project: ProjectState): Map<string, TrustScoreResult> => {
+  const engine = getTrustScoreEngine();
+  return engine.calculateBatchTrustScores(project.insights || [], project.sources || []);
+};
+
+/**
+ * Get health recommendations based on trust analysis
+ */
+export const getHealthRecommendations = (project: ProjectState): string[] => {
+  const trustResult = calculateProjectTrust(project);
+  return trustResult.recommendations;
+};
+
+/**
+ * Get trust score color configuration for UI
+ */
+export { getTrustScoreColor };

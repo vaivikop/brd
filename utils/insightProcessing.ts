@@ -3,7 +3,15 @@
  * Enterprise-grade semantic similarity, deduplication, and confidence scoring
  */
 
-import { Insight, SourceReference, MoSCoWPriority } from './db';
+import { Insight, SourceReference, MoSCoWPriority, Source } from './db';
+import { 
+  TrustScoreEngine, 
+  TrustScoreResult, 
+  getTrustScoreEngine,
+  calculateTrustScore,
+  trustScoreToConfidence,
+  getTrustScoreColor
+} from './TrustScoreEngine';
 
 // ============================================================================
 // SEMANTIC SIMILARITY
@@ -114,43 +122,38 @@ export const findDuplicateInsights = (
 };
 
 // ============================================================================
-// CONFIDENCE SCORING
+// CONFIDENCE SCORING (Enhanced with TrustScoreEngine v2.0)
 // ============================================================================
 
 /**
  * Calculate dynamic confidence score based on evidence
+ * @deprecated Use calculateComprehensiveTrustScore for full analysis
  */
 export const calculateConfidenceScore = (insight: Insight): number => {
-  let score = 50; // Base score
-  
-  // Evidence count boost (+10 per source, max +40)
-  const evidenceCount = insight.evidenceCount || 1;
-  score += Math.min(40, evidenceCount * 10);
-  
-  // Category-specific adjustments
-  if (insight.category === 'requirement') {
-    // Requirements need more evidence
-    score -= 10;
-    if (evidenceCount >= 2) score += 15;
-  }
-  
-  // Stakeholder mentions boost
-  const stakeholderCount = insight.stakeholderMentions?.length || 0;
-  score += Math.min(15, stakeholderCount * 5);
-  
-  // Conflict penalty
-  if (insight.hasConflicts) {
-    score -= 20;
-  }
-  
-  // Recency boost (within last 7 days)
-  const daysSinceCreation = (Date.now() - new Date(insight.timestamp).getTime()) / (1000 * 60 * 60 * 24);
-  if (daysSinceCreation < 7) {
-    score += 5;
-  }
-  
-  // Clamp to 0-100
-  return Math.max(0, Math.min(100, score));
+  // Use the quick calculation from TrustScoreEngine for backward compatibility
+  return getTrustScoreEngine().calculateQuickTrustScore(insight);
+};
+
+/**
+ * Calculate comprehensive trust score with full factor analysis
+ * This is the recommended method for production use
+ */
+export const calculateComprehensiveTrustScore = (
+  insight: Insight,
+  allInsights: Insight[] = [],
+  sources: Source[] = []
+): TrustScoreResult => {
+  return calculateTrustScore(insight, allInsights, sources);
+};
+
+/**
+ * Batch calculate trust scores for all insights in a project
+ */
+export const calculateAllTrustScores = (
+  insights: Insight[],
+  sources: Source[] = []
+): Map<string, TrustScoreResult> => {
+  return getTrustScoreEngine().calculateBatchTrustScores(insights, sources);
 };
 
 /**

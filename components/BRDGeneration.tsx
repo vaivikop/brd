@@ -181,10 +181,9 @@ const BRDGeneration: React.FC<BRDGenerationProps> = ({ project, onUpdate, onCont
 
   const handleRestoreVersion = async (version: any) => {
     if (!version) return;
+    // Just show the version without creating a new version
     const updated = await updateBRD({
-      ...version,
-      version: (brd?.version || 0) + 1,
-      generatedAt: new Date().toISOString()
+      ...version
     });
     onUpdate(updated);
     setShowHistory(false);
@@ -448,6 +447,15 @@ const BRDGeneration: React.FC<BRDGenerationProps> = ({ project, onUpdate, onCont
           <Button variant="outline" onClick={() => setShowHistory(true)} className="rounded-xl border-slate-200 text-slate-600 hover:bg-slate-50">
             <History className="h-4 w-4 sm:mr-2" /> <span className="hidden sm:inline">History</span>
           </Button>
+          <Button 
+            variant="outline" 
+            onClick={handleGenerate}
+            disabled={isGenerating}
+            className="rounded-xl border-slate-200 text-slate-600 hover:bg-slate-50"
+          >
+            <RefreshCw className={`h-4 w-4 sm:mr-2 ${isGenerating ? 'animate-spin' : ''}`} /> 
+            <span className="hidden sm:inline">Regenerate BRD</span>
+          </Button>
         </div>
         
         {/* Export Error Toast */}
@@ -564,7 +572,7 @@ const BRDGeneration: React.FC<BRDGenerationProps> = ({ project, onUpdate, onCont
                               <div className="space-y-3">
                                 <p className="text-xs text-slate-500 font-medium">This section was synthesized from the following verified sources:</p>
                                 <div className="flex flex-wrap gap-2">
-                                  {section.sources.map((source, i) => (
+                                  {(section.sources || []).map((source, i) => (
                                     <SourceBadge key={i} sourceName={source} />
                                   ))}
                                 </div>
@@ -717,7 +725,17 @@ const BRDGeneration: React.FC<BRDGenerationProps> = ({ project, onUpdate, onCont
               className="relative w-full max-w-2xl bg-white rounded-[2.5rem] shadow-2xl overflow-hidden"
             >
               <div className="p-8 border-b border-slate-100 flex items-center justify-between">
-                <h3 className="text-2xl font-black text-slate-900">Document History</h3>
+                <div className="flex items-center gap-4">
+                  <h3 className="text-2xl font-black text-slate-900">Document History</h3>
+                  <Button 
+                    onClick={() => { setShowHistory(false); handleGenerate(); }}
+                    disabled={isGenerating}
+                    className="rounded-xl"
+                  >
+                    <RefreshCw className={`h-4 w-4 mr-2 ${isGenerating ? 'animate-spin' : ''}`} />
+                    Regenerate
+                  </Button>
+                </div>
                 <button onClick={() => setShowHistory(false)} className="p-2 hover:bg-slate-100 rounded-xl transition-colors">
                   <X className="h-6 w-6 text-slate-400" />
                 </button>
@@ -735,8 +753,8 @@ const BRDGeneration: React.FC<BRDGenerationProps> = ({ project, onUpdate, onCont
                           <Clock className="h-3.5 w-3.5" /> {new Date(version.generatedAt).toLocaleString()}
                         </p>
                       </div>
-                      <Button variant="outline" onClick={() => handleRestoreVersion(version)} className="rounded-xl opacity-0 group-hover:opacity-100 transition-opacity">
-                        Restore
+                      <Button variant="outline" onClick={() => handleRestoreVersion(version)} className="rounded-xl">
+                        <Eye className="h-4 w-4 mr-2" /> View
                       </Button>
                     </div>
                   ))

@@ -117,6 +117,239 @@ const trackAPICall = () => {
 };
 
 // ============================================================================
+// JSON REPAIR - Fix truncated/malformed JSON from AI responses
+// ============================================================================
+
+const repairJson = (text: string): string => {
+  let json = text.trim();
+  
+  // Remove any markdown code block markers
+  json = json.replace(/^```json\s*/i, '').replace(/^```\s*/i, '').replace(/\s*```$/i, '');
+  
+  // Strategy 1: Try to find last complete object in array and truncate there
+  // This handles cases where the JSON got cut off mid-object
+  const lastCompleteObjectMatch = findLastCompleteObject(json);
+  if (lastCompleteObjectMatch) {
+    json = lastCompleteObjectMatch;
+  } else {
+    // Strategy 2: Simple bracket/brace closing
+    json = simpleRepair(json);
+  }
+  
+  return json;
+};
+
+const findLastCompleteObject = (json: string): string | null => {
+  // For arrays of objects, find the last complete object
+  if (!json.startsWith('[')) return null;
+  
+  let depth = 0;
+  let inString = false;
+  let escapeNext = false;
+  let lastObjectEnd = -1;
+  
+  for (let i = 0; i < json.length; i++) {
+    const char = json[i];
+    
+    if (escapeNext) {
+      escapeNext = false;
+      continue;
+    }
+    
+    if (char === '\\') {
+      escapeNext = true;
+      continue;
+    }
+    
+    if (char === '"') {
+      inString = !inString;
+      continue;
+    }
+    
+    if (!inString) {
+      if (char === '{') depth++;
+      if (char === '}') {
+        depth--;
+        if (depth === 0) {
+          // Found end of a top-level object in the array
+          lastObjectEnd = i;
+        }
+      }
+    }
+  }
+  
+  if (lastObjectEnd > 0) {
+    // Check if there's incomplete content after the last complete object
+    const afterLastObject = json.slice(lastObjectEnd + 1).trim();
+    if (afterLastObject && afterLastObject !== ']' && !afterLastObject.startsWith(']')) {
+      // Truncate to last complete object and close array
+      return json.slice(0, lastObjectEnd + 1) + ']';
+    }
+  }
+  
+  return null;
+};
+
+const simpleRepair = (json: string): string => {
+  // Count open brackets and braces
+  let openBraces = 0;
+  let openBrackets = 0;
+  let inString = false;
+  let escapeNext = false;
+  
+  for (let i = 0; i < json.length; i++) {
+    const char = json[i];
+    
+    if (escapeNext) {
+      escapeNext = false;
+      continue;
+    }
+    
+    if (char === '\\') {
+      escapeNext = true;
+      continue;
+    }
+    
+    if (char === '"' && !escapeNext) {
+      inString = !inString;
+      continue;
+    }
+    
+    if (!inString) {
+      if (char === '{') openBraces++;
+      if (char === '}') openBraces--;
+      if (char === '[') openBrackets++;
+      if (char === ']') openBrackets--;
+    }
+  }
+  
+  // If we ended inside a string, close it
+  if (inString) {
+    json += '"';
+  }
+  
+  // Close any open braces/brackets
+  while (openBraces > 0) {
+    json += '}';
+    openBraces--;
+  }
+  while (openBrackets > 0) {
+    json += ']';
+    openBrackets--;
+  }
+  
+  // Try to fix common truncation patterns
+  json = json.replace(/,\s*"[^"]*":\s*"?$/g, '');
+  json = json.replace(/,\s*"[^"]*":\s*$/g, '');
+  json = json.replace(/,\s*$/g, '');
+  
+  // Recount after fixes
+  openBraces = 0;
+  openBrackets = 0;
+  inString = false;
+  escapeNext = false;
+  
+  for (let i = 0; i < json.length; i++) {
+    const char = json[i];
+    if (escapeNext) { escapeNext = false; continue; }
+    if (char === '\\') { escapeNext = true; continue; }
+    if (char === '"' && !escapeNext) { inString = !inString; continue; }
+    if (!inString) {
+      if (char === '{') openBraces++;
+      if (char === '}') openBraces--;
+      if (char === '[') openBrackets++;
+      if (char === ']') openBrackets--;
+    }
+  }
+  
+  while (openBraces > 0) { json += '}'; openBraces--; }
+  while (openBrackets > 0) { json += ']'; openBrackets--; }
+  
+  return json;
+};
+
+const safeJsonParse = <T>(text: string, fallback: T): T => {
+  try {
+    return JSON.parse(text);
+  } catch (e) {
+    console.warn('[AI] JSON parse failed, attempting repair...');
+    try {
+      const repaired = repairJson(text);
+      console.log('[AI] Repaired JSON:', repaired.slice(0, 200) + '...');
+      return JSON.parse(repaired);
+    } catch (e2) {
+      console.error('[AI] JSON repair failed:', e2);
+      // Last resort: try to extract any complete objects from array
+      try {
+        const extracted = extractCompleteObjects(text);
+        if (extracted.length > 0) {
+          console.log('[AI] Extracted', extracted.length, 'complete objects');
+          return extracted as T;
+        }
+      } catch (e3) {
+        // ignore
+      }
+      return fallback;
+    }
+  }
+};
+
+const extractCompleteObjects = (text: string): any[] => {
+  const objects: any[] = [];
+  let json = text.trim();
+  
+  // Remove markdown and array start
+  json = json.replace(/^```json\s*/i, '').replace(/^```\s*/i, '');
+  if (json.startsWith('[')) json = json.slice(1);
+  
+  let depth = 0;
+  let start = -1;
+  let inString = false;
+  let escapeNext = false;
+  
+  for (let i = 0; i < json.length; i++) {
+    const char = json[i];
+    
+    if (escapeNext) {
+      escapeNext = false;
+      continue;
+    }
+    
+    if (char === '\\') {
+      escapeNext = true;
+      continue;
+    }
+    
+    if (char === '"') {
+      inString = !inString;
+      continue;
+    }
+    
+    if (!inString) {
+      if (char === '{') {
+        if (depth === 0) start = i;
+        depth++;
+      }
+      if (char === '}') {
+        depth--;
+        if (depth === 0 && start >= 0) {
+          const objStr = json.slice(start, i + 1);
+          try {
+            const obj = JSON.parse(objStr);
+            objects.push(obj);
+          } catch {
+            // Skip malformed object
+          }
+          start = -1;
+        }
+      }
+    }
+  }
+  
+  return objects;
+};
+
+// ============================================================================
 // BATCH PROCESSING - Process multiple items efficiently
 // ============================================================================
 
@@ -560,7 +793,10 @@ Return JSON array of exactly 9 section objects. Be comprehensive yet concise - a
     const text = response.text;
     if (!text) throw new Error("No response from AI");
     
-    const result = JSON.parse(text);
+    const result = safeJsonParse<BRDSection[]>(text, []);
+    if (result.length === 0) {
+      throw new Error("Failed to parse BRD sections from AI response");
+    }
     setCache(cacheKey, result);
     return result;
   } catch (error) {
@@ -1128,10 +1364,17 @@ For evidenceQuotes, include actual quotes or paraphrased evidence from the sourc
       const text = response.text;
       if (!text) throw new Error("No response");
       
-      const result = JSON.parse(text);
+      const result = safeJsonParse<any>(text, {
+        overallProjectSentiment: 'neutral',
+        averageSentimentScore: 0,
+        stakeholders: [],
+        topConcerns: [],
+        positiveHighlights: [],
+        riskAreas: []
+      });
       const report: SentimentReport = {
         ...result,
-        stakeholders: result.stakeholders.map((s: any) => ({
+        stakeholders: (result.stakeholders || []).map((s: any) => ({
           ...s,
           sourceCount: insights.filter(i => i.source.toLowerCase().includes(s.stakeholder.toLowerCase())).length || 1,
           lastMentioned: new Date().toISOString()
@@ -1286,7 +1529,16 @@ Return JSON: executiveSummary, progressMetrics[](label,current,target,status), k
       const text = response.text;
       if (!text) throw new Error("No response");
       
-      const result = JSON.parse(text);
+      const result = safeJsonParse<any>(text, {
+        executiveSummary: 'Unable to generate summary',
+        progressMetrics: { completionPercentage: 0, tasksCompleted: 0, totalTasks: 0 },
+        keyAccomplishments: [],
+        activeRisks: [],
+        upcomingMilestones: [],
+        actionItems: [],
+        recommendations: [],
+        nextSteps: []
+      });
       const report: StatusReport = {
         id: `report_${Date.now()}`,
         title: `${project.name} - Status Report`,
@@ -1403,12 +1655,12 @@ Return JSON: { requirements: [{ index, dependencies[], testCriteria, stakeholder
       const text = response.text;
       if (!text) throw new Error("No response");
       
-      const result = JSON.parse(text);
+      const result = safeJsonParse<{ requirements: any[] }>(text, { requirements: [] });
       const deps: Record<string, string[]> = {};
       const tests: Record<string, string> = {};
       const stakeholders: Record<string, { name: string; role: string; confidence: number }[]> = {};
       
-      result.requirements.forEach((r: any) => {
+      (result.requirements || []).forEach((r: any) => {
         const reqId = requirements[r.index - 1]?.id;
         if (reqId) {
           deps[reqId] = r.dependencies.map((d: number) => requirements[d - 1]?.id).filter(Boolean);
@@ -1610,9 +1862,9 @@ export const analyzeSource = async (
     const text = response.text;
     if (!text) throw new Error("No response from AI");
     
-    const result = JSON.parse(text);
-    const tasks = result.tasks.map((t: any) => ({ ...t, source: sourceName }));
-    const insights = result.insights.map((i: any) => ({ 
+    const result = safeJsonParse<any>(text, { tasks: [], insights: [], confidenceBoost: 0 });
+    const tasks = (result.tasks || []).map((t: any) => ({ ...t, source: sourceName }));
+    const insights = (result.insights || []).map((i: any) => ({ 
       ...i, 
       source: sourceName, 
       sourceType: sourceType as any,
@@ -1864,7 +2116,11 @@ Return JSON array of ${sections.length} section objects.
     const text = response.text;
     if (!text) throw new Error("No response from AI");
     
-    const result = JSON.parse(text);
+    const result = safeJsonParse<BRDSection[]>(text, []);
+    
+    if (result.length === 0) {
+      throw new Error("Failed to parse BRD sections from AI response");
+    }
     
     // Simulate progress through sections
     for (let i = 0; i < result.length; i++) {
@@ -1898,7 +2154,7 @@ Current Content:
 ${section.content}
 
 Current Confidence: ${section.confidence}%
-Current Sources: ${section.sources.join(', ')}
+Current Sources: ${(section.sources || []).join(', ')}
 
 ═══════════════════════════════════════════════════════════════════════════════
 AVAILABLE INSIGHTS

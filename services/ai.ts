@@ -1,5 +1,11 @@
 import { GoogleGenAI, Type } from "@google/genai";
-import { Task, Insight, BRDSection } from "../db";
+import { Task, Insight, BRDSection, ProjectState } from "../utils/db";
+import type { TrustScoreResult } from "../utils/TrustScoreEngine";
+import { 
+  calculateProjectTrust, 
+  getTrustScoreColor,
+  formatTrustScore
+} from "../utils/TrustScoreEngine";
 
 const ai = new GoogleGenAI({ apiKey: import.meta.env.VITE_GEMINI_API_KEY });
 
@@ -524,6 +530,87 @@ export interface TrustScoreAnalysis {
   summary: string;
 }
 
+/**
+ * Quick synchronous trust score calculation using TrustScoreEngine
+ * No API calls - instant results for real-time UI updates
+ */
+export const getQuickTrustScore = (project: ProjectState): TrustScoreAnalysis => {
+  const trustResult = calculateProjectTrust(project);
+  
+  // Map TrustScoreEngine factors to breakdown
+  const findFactor = (name: string) => 
+    trustResult.factors.find(f => f.name.toLowerCase().includes(name.toLowerCase()))?.score || 60;
+  
+  const score = trustResult.finalScore;
+  // More achievable grade thresholds
+  const grade = score >= 85 ? 'A' : score >= 72 ? 'B' : score >= 58 ? 'C' : score >= 45 ? 'D' : 'F';
+  
+  // Always find strengths first - look for factors >= 55 (reasonable threshold)
+  const strongFactors = trustResult.factors.filter(f => f.score >= 55)
+    .sort((a, b) => b.score - a.score)
+    .slice(0, 3)
+    .map(f => {
+      if (f.score >= 80) return `Excellent ${f.name.toLowerCase()}`;
+      if (f.score >= 70) return `Strong ${f.name.toLowerCase()}`;
+      return `Good ${f.name.toLowerCase()}`;
+    });
+  
+  // Default strengths if factors are still building
+  const strengths = strongFactors.length > 0 ? strongFactors : [
+    project.sources.length > 0 ? 'Data sources connected' : 'Project initialized',
+    project.insights.length > 0 ? 'Insights extracted' : 'Ready for analysis',
+    'System configured and operational'
+  ];
+  
+  // Only show improvements for factors below 55
+  const weakFactors = trustResult.factors.filter(f => f.score < 55);
+  const improvements = weakFactors.length > 0 
+    ? trustResult.recommendations.slice(0, 2)
+    : [];
+  
+  // Positive-first summary
+  const generateSummary = () => {
+    const hasData = project.sources.length > 0 || project.insights.length > 0;
+    const highCount = trustResult.factors.filter(f => f.score >= 70).length;
+    
+    if (score >= 80) {
+      return `Excellent project health. ${trustResult.metadata.dominantFactor} leads at ${Math.round(trustResult.metadata.dominantScore)}%.`;
+    }
+    if (score >= 65) {
+      return `Good project progress. ${highCount > 0 ? `${highCount} factor(s) performing well.` : 'On track for completion.'}`;
+    }
+    if (hasData) {
+      return `Project developing well. ${strongFactors.length > 0 ? `${strongFactors[0]} is a highlight.` : 'Continue adding data for best results.'}`;
+    }
+    return 'Project ready to begin. Add sources to start analysis.';
+  };
+  
+  return {
+    score,
+    grade,
+    breakdown: {
+      dataQuality: findFactor('Source'),
+      requirementClarity: findFactor('Linguistic'),
+      stakeholderAlignment: findFactor('Stakeholder'),
+      riskCoverage: findFactor('Task'),
+      completeness: findFactor('Coverage') || findFactor('BRD')
+    },
+    strengths,
+    improvements,
+    summary: generateSummary()
+  };
+};
+
+/**
+ * Re-export TrustScoreEngine utilities for components
+ */
+export type { TrustScoreResult };
+export { 
+  getTrustScoreColor, 
+  formatTrustScore,
+  calculateProjectTrust as calculateInstantTrustScore
+};
+
 export const calculateTrustScore = async (
   project: {
     name: string;
@@ -937,7 +1024,7 @@ export const chatWithClarityActions = async (
       ${projectContext.insights.slice(0, 8).map(i => `• ${i.category}: ${i.summary} (${i.status})`).join('\n      ') || 'None yet'}
     - Tasks (${projectContext.tasks.length}):
       ${projectContext.tasks.slice(0, 8).map(t => `• "${t.title}" - ${t.type}, ${t.urgency} priority, ${t.status || 'pending'}`).join('\n      ') || 'None yet'}
-    ${projectContext.brd ? `- BRD Sections: ${projectContext.brd.sections.map(s => s.title).join(', ')}` : '- BRD: Not generated yet'}
+    ${projectContext.brd ? `- BRD Sections (${projectContext.brd.sections.length}):\n      ${projectContext.brd.sections.map(s => `• ${s.title}: ${s.content.slice(0, 300)}${s.content.length > 300 ? '...' : ''}`).join('\n      ')}` : '- BRD: Not generated yet'}
     
     (Internal reference - DO NOT show these IDs to user, only use them in action data):
     Tasks: ${projectContext.tasks.slice(0, 8).map(t => `${t.title}=${t.id}`).join(', ')}
@@ -963,6 +1050,9 @@ export const chatWithClarityActions = async (
     - add_task: { "title": "Task name", "type": "action|clarification|missing|conflict", "urgency": "high|medium|low" }
     - complete_task: { "taskId": "t...", "title": "Task name for matching" }
     - update_brd_section: { "sectionId": "s...", "updates": { "content": "new content" } }
+    - navigate: { "destination": "sources|insights|generate|graph" }
+      VALID DESTINATIONS ONLY: "sources" (data sources page), "insights" (insights review), "generate" or "brd" (BRD generation page), "graph" (knowledge graph view)
+      IMPORTANT: When user asks about a BRD section (like "Executive Summary", "Scope", etc.), SHARE the content directly from the BRD sections above in your message. You have access to the section content - use it!
     
     Examples of good responses:
     - "Done! I've added 'mobile platform support' to your project goals. 📱"

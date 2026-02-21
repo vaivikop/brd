@@ -310,7 +310,7 @@ export async function exportBRDToPDF(options: ExportOptions): Promise<void> {
     pdf.setFontSize(9);
     pdf.setFont('helvetica', 'normal');
     pdf.setTextColor(...colors.lightText);
-    const infoText = `Confidence: ${section.confidence}% • Sources: ${section.sources.length}`;
+    const infoText = `Confidence: ${section.confidence}% • Sources: ${section.sources?.length || 0}`;
     pdf.text(infoText, margin, currentY);
     
     currentY += 15;
@@ -543,7 +543,7 @@ export async function exportToWord(project: ProjectState): Promise<void> {
     <div class="section">
       <h1>${index + 1}. ${section.title}</h1>
       <p style="font-size: 10pt; color: #6b7280;">
-        Confidence: ${section.confidence}% | Sources: ${section.sources.join(', ') || 'N/A'}
+        Confidence: ${section.confidence}% | Sources: ${(section.sources || []).join(', ') || 'N/A'}
       </p>
       ${markdownToHTML(section.content)}
     </div>
@@ -727,7 +727,7 @@ export async function exportToHTML(project: ProjectState): Promise<void> {
           <h2>${section.title}</h2>
         </div>
         <div class="section-meta">
-          Confidence: ${section.confidence}% • Sources: ${section.sources.join(', ') || 'N/A'}
+          Confidence: ${section.confidence}% • Sources: ${(section.sources || []).join(', ') || 'N/A'}
         </div>
         <div class="content">
           ${markdownToHTML(section.content)}
@@ -781,7 +781,7 @@ h2. ${index + 1}. ${section.title}
 
 {panel:title=Section Metadata|borderStyle=solid|borderColor=#ccc}
 *Confidence:* ${section.confidence}%
-*Sources:* ${section.sources.join(', ') || 'N/A'}
+*Sources:* ${(section.sources || []).join(', ') || 'N/A'}
 {panel}
 
 ${markdownToConfluence(section.content)}

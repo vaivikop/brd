@@ -36,12 +36,16 @@ export const NavigationProvider: React.FC<{ children: ReactNode }> = ({ children
   useEffect(() => {
     const checkForProject = async () => {
       try {
-        const request = indexedDB.open('ClarityAI_BRD', 1);
+        const request = indexedDB.open('ClarityAI_DB', 3);
         request.onsuccess = () => {
           const db = request.result;
-          const transaction = db.transaction(['projects'], 'readonly');
-          const store = transaction.objectStore('projects');
-          const getRequest = store.get('main');
+          // Check if the object store exists before using it
+          if (!db.objectStoreNames.contains('project_store')) {
+            return;
+          }
+          const transaction = db.transaction(['project_store'], 'readonly');
+          const store = transaction.objectStore('project_store');
+          const getRequest = store.get('current_project');
           getRequest.onsuccess = () => {
             if (getRequest.result && currentView === 'landing') {
               // Project exists, redirect to dashboard
@@ -49,6 +53,9 @@ export const NavigationProvider: React.FC<{ children: ReactNode }> = ({ children
               localStorage.setItem(STORAGE_KEY, 'dashboard');
             }
           };
+        };
+        request.onerror = () => {
+          // Ignore errors - just stay on current view
         };
       } catch (e) {
         // Ignore errors - just stay on current view

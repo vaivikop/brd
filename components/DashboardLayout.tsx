@@ -16,14 +16,25 @@ import { getProjectData, ProjectState } from '../utils/db';
 import { Loader, RefreshCw, AlertCircle, Menu } from 'lucide-react';
 import ErrorBoundary from './ErrorBoundary';
 
+const ACTIVE_TAB_KEY = 'clarityai_active_tab';
+
 const DashboardLayout: React.FC = () => {
-  const [activeTab, setActiveTab] = useState('dashboard');
+  const [activeTab, setActiveTabState] = useState(() => {
+    const saved = localStorage.getItem(ACTIVE_TAB_KEY);
+    return saved || 'dashboard';
+  });
   const [project, setProject] = useState<ProjectState | null>(null);
   const [loading, setLoading] = useState(true);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(() => {
     const saved = localStorage.getItem('clarityai_sidebar_collapsed');
     return saved === 'true';
   });
+
+  // Wrapper to persist activeTab to localStorage
+  const setActiveTab = (tab: string) => {
+    setActiveTabState(tab);
+    localStorage.setItem(ACTIVE_TAB_KEY, tab);
+  };
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [lastRefresh, setLastRefresh] = useState<Date>(new Date());

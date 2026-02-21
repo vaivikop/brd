@@ -63,13 +63,17 @@ import { calculateAllMetrics } from '../utils/metrics';
 import { 
   calculateTrustScore, 
   TrustScoreAnalysis, 
-  chatWithClarityActions,
-  ChatMessage, 
-  ChatResponseWithActions,
-  AIAction,
+  getQuickTrustScore,
   searchProject,
   SearchResult 
 } from '../services/ai';
+import {
+  clarityChatService,
+  ChatMessage,
+  ChatResponse,
+  AIAction,
+  ProjectContext,
+} from '../services/ChatService';
 
 interface DashboardHomeProps {
   project: ProjectState;
@@ -106,6 +110,7 @@ const DashboardHome: React.FC<DashboardHomeProps> = ({ project, onNavigateToSour
   const [showChatHistory, setShowChatHistory] = useState(false);
   const [chatSessionId] = useState(() => `session_${Date.now()}`);
   const [savedChats, setSavedChats] = useState<{id: string; title: string; messages: ChatMessage[]; timestamp: string}[]>([]);
+  const [suggestedQuestions, setSuggestedQuestions] = useState<string[]>([]);
   const CHAT_STORAGE_KEY = 'clarity_chat_history';
   const CHAT_SESSION_KEY = 'clarity_current_chat';
   const [feedbackGiven, setFeedbackGiven] = useState<Set<number>>(new Set());
@@ -250,9 +255,18 @@ const DashboardHome: React.FC<DashboardHomeProps> = ({ project, onNavigateToSour
     return <>{elements}</>;
   }, []);
 
-  // Fetch Trust Score from Gemini on mount
+  // Fetch Trust Score - use quick score immediately, then fetch AI score async
   useEffect(() => {
-    const fetchTrustScore = async () => {
+    // Immediate calculation using TrustScoreEngine (no API call)
+    try {
+      const quickScore = getQuickTrustScore(project);
+      setTrustScore(quickScore);
+    } catch (err) {
+      console.error('Quick trust score error:', err);
+    }
+
+    // Then fetch detailed AI score in background (optional)
+    const fetchDetailedTrustScore = async () => {
       setIsLoadingTrustScore(true);
       setTrustScoreError(null);
       try {
@@ -282,16 +296,17 @@ const DashboardHome: React.FC<DashboardHomeProps> = ({ project, onNavigateToSour
         setTrustScore(score);
       } catch (err) {
         console.error('Trust score error:', err);
-        setTrustScoreError('Failed to calculate trust score');
+        // Keep using quick score on error - don't show error to user
       } finally {
         setIsLoadingTrustScore(false);
       }
     };
 
-    if (project.sources.length > 0) {
-      fetchTrustScore();
+    // Only fetch detailed score if we have significant data
+    if (project.sources.length > 0 && project.insights.length > 3) {
+      fetchDetailedTrustScore();
     }
-  }, [project.sources.length, project.insights.length, project.tasks.length, project.brd?.sections?.length]);
+  }, [project.sources.length, project.insights.length, project.tasks.length, project.brd?.sections?.length, project.lastUpdated]);
 
   // Search functionality
   useEffect(() => {
@@ -392,6 +407,14 @@ const DashboardHome: React.FC<DashboardHomeProps> = ({ project, onNavigateToSour
 
   // Refresh trust score
   const handleRefreshTrustScore = async () => {
+    // Immediate update with quick score
+    try {
+      const quickScore = getQuickTrustScore(project);
+      setTrustScore(quickScore);
+    } catch (err) {
+      console.error('Quick score error:', err);
+    }
+
     setIsLoadingTrustScore(true);
     setTrustScoreError(null);
     try {
@@ -488,23 +511,41 @@ const DashboardHome: React.FC<DashboardHomeProps> = ({ project, onNavigateToSour
   ], []);
 
   // ============================================================================
-  // ACTION EXECUTOR - Execute actions from AI
+  // ACTION EXECUTOR - Execute actions from AI (Enterprise Grade)
   // ============================================================================
   const executeAIActions = useCallback(async (actions: AIAction[], userMessage?: string): Promise<{ success: boolean; results: string[] }> => {
     const results: string[] = [];
     let updatedProject = project;
+    let hasErrors = false;
     
-    for (const action of actions) {
+    // Validate actions before execution
+    const validActions = actions.filter(action => {
+      if (!action.type || action.type === 'none') return false;
+      if (!action.data && ['add_task', 'update_project_goals'].includes(action.type)) {
+        console.warn(`Action ${action.type} missing required data`);
+        return false;
+      }
+      return true;
+    });
+
+    console.log(`Executing ${validActions.length} valid actions out of ${actions.length} total`);
+    
+    for (const action of validActions) {
+      const actionStartTime = Date.now();
       try {
         switch (action.type) {
           case 'add_task': {
             const taskData = action.data as { title: string; type?: string; urgency?: string; description?: string };
+            if (!taskData.title || taskData.title.length < 2) {
+              results.push(`Skipped adding task: Invalid title`);
+              break;
+            }
             updatedProject = await addTask({
               title: taskData.title,
               type: (taskData.type as Task['type']) || 'missing',
               urgency: (taskData.urgency as Task['urgency']) || 'medium',
               source: 'Clarity AI',
-              confidence: 80,
+              confidence: action.confidence || 80,
               description: taskData.description,
               status: 'pending'
             });
@@ -519,12 +560,18 @@ const DashboardHome: React.FC<DashboardHomeProps> = ({ project, onNavigateToSour
               ? project.tasks.find(t => t.id === taskId)
               : project.tasks.find(t => t.title.toLowerCase().includes((title || '').toLowerCase()));
             if (targetTask) {
-              updatedProject = await updateTask(targetTask.id, { 
-                status: 'completed', 
-                completedAt: new Date().toISOString() 
-              });
-              results.push(`Completed task: "${targetTask.title}"`);
-              await addActivityLog(`Completed task: ${targetTask.title}`, 'Clarity AI');
+              if (targetTask.status === 'completed') {
+                results.push(`Task "${targetTask.title}" is already completed`);
+              } else {
+                updatedProject = await updateTask(targetTask.id, { 
+                  status: 'completed', 
+                  completedAt: new Date().toISOString() 
+                });
+                results.push(`Completed task: "${targetTask.title}"`);
+                await addActivityLog(`Completed task: ${targetTask.title}`, 'Clarity AI');
+              }
+            } else {
+              results.push(`Could not find task to complete`);
             }
             break;
           }
@@ -538,6 +585,8 @@ const DashboardHome: React.FC<DashboardHomeProps> = ({ project, onNavigateToSour
               updatedProject = await deleteTask(targetTask.id);
               results.push(`Deleted task: "${targetTask.title}"`);
               await addActivityLog(`Deleted task: ${targetTask.title}`, 'Clarity AI');
+            } else {
+              results.push(`Could not find task to delete`);
             }
             break;
           }
@@ -560,9 +609,26 @@ const DashboardHome: React.FC<DashboardHomeProps> = ({ project, onNavigateToSour
               ? project.insights.find(i => i.id === insightId)
               : project.insights.find(i => i.summary.toLowerCase().includes((summary || '').toLowerCase()));
             if (targetInsight) {
-              updatedProject = await updateInsightStatus(targetInsight.id, 'approved');
-              results.push(`Approved insight: "${targetInsight.summary.slice(0, 50)}..."`);
-              await addActivityLog(`Approved insight: ${targetInsight.summary.slice(0, 30)}...`, 'Clarity AI');
+              if (targetInsight.status === 'approved') {
+                results.push(`Insight is already approved`);
+              } else {
+                updatedProject = await updateInsightStatus(targetInsight.id, 'approved');
+                results.push(`Approved insight: "${targetInsight.summary.slice(0, 50)}..."`);
+                await addActivityLog(`Approved insight: ${targetInsight.summary.slice(0, 30)}...`, 'Clarity AI');
+              }
+            }
+            break;
+          }
+          
+          case 'reject_insight': {
+            const { insightId, summary } = action.data as { insightId?: string; summary?: string };
+            const targetInsight = insightId 
+              ? project.insights.find(i => i.id === insightId)
+              : project.insights.find(i => i.summary.toLowerCase().includes((summary || '').toLowerCase()));
+            if (targetInsight) {
+              updatedProject = await updateInsightStatus(targetInsight.id, 'rejected');
+              results.push(`Rejected insight: "${targetInsight.summary.slice(0, 50)}..."`);
+              await addActivityLog(`Rejected insight: ${targetInsight.summary.slice(0, 30)}...`, 'Clarity AI');
             }
             break;
           }
@@ -575,23 +641,33 @@ const DashboardHome: React.FC<DashboardHomeProps> = ({ project, onNavigateToSour
               );
               results.push(`Approved ${pendingInsights.length} insights`);
               await addActivityLog(`Bulk approved ${pendingInsights.length} insights`, 'Clarity AI');
+            } else {
+              results.push(`No pending insights to approve`);
             }
             break;
           }
           
           case 'update_brd_section': {
-            const { sectionId, title, content } = action.data as { sectionId?: string; title?: string; content: string };
-            if (project.brd) {
+            const { sectionId, title, content, sectionTitle } = action.data as { 
+              sectionId?: string; 
+              title?: string; 
+              sectionTitle?: string;
+              content?: string 
+            };
+            if (project.brd && content) {
+              const searchTitle = sectionTitle || title || '';
               const targetSection = sectionId 
                 ? project.brd.sections.find(s => s.id === sectionId)
-                : project.brd.sections.find(s => s.title.toLowerCase().includes((title || '').toLowerCase()));
+                : project.brd.sections.find(s => s.title.toLowerCase().includes(searchTitle.toLowerCase()));
               if (targetSection) {
                 const updatedSections = project.brd.sections.map(s => 
-                  s.id === targetSection.id ? { ...s, content } : s
+                  s.id === targetSection.id ? { ...s, content, lastEdited: new Date().toISOString() } : s
                 );
                 updatedProject = await updateBRD({ ...project.brd, sections: updatedSections });
                 results.push(`Updated BRD section: "${targetSection.title}"`);
                 await addActivityLog(`Updated BRD section: ${targetSection.title}`, 'Clarity AI');
+              } else {
+                results.push(`Could not find BRD section to update`);
               }
             }
             break;
@@ -599,40 +675,52 @@ const DashboardHome: React.FC<DashboardHomeProps> = ({ project, onNavigateToSour
           
           case 'add_brd_section': {
             const { title, content } = action.data as { title: string; content: string };
-            if (project.brd) {
-              const newSection = {
-                id: `section_${Date.now()}`,
-                title,
-                content,
-                status: 'draft' as const,
-                confidence: 75,
-                lastEdited: new Date().toISOString(),
-                sources: []
-              };
-              updatedProject = await updateBRD({ 
-                ...project.brd, 
-                sections: [...project.brd.sections, newSection] 
-              });
-              results.push(`Added BRD section: "${title}"`);
-              await addActivityLog(`Added BRD section: ${title}`, 'Clarity AI');
+            if (project.brd && title && content) {
+              // Check if section already exists
+              const exists = project.brd.sections.some(s => 
+                s.title.toLowerCase() === title.toLowerCase()
+              );
+              if (exists) {
+                results.push(`Section "${title}" already exists`);
+              } else {
+                const newSection = {
+                  id: `section_${Date.now()}`,
+                  title,
+                  content,
+                  status: 'draft' as const,
+                  confidence: action.confidence || 75,
+                  lastEdited: new Date().toISOString(),
+                  sources: []
+                };
+                updatedProject = await updateBRD({ 
+                  ...project.brd, 
+                  sections: [...project.brd.sections, newSection] 
+                });
+                results.push(`Added BRD section: "${title}"`);
+                await addActivityLog(`Added BRD section: ${title}`, 'Clarity AI');
+              }
             }
             break;
           }
           
           case 'update_project_goals': {
             console.log('update_project_goals action received:', JSON.stringify(action, null, 2));
-            const actionData = action.data as { goals?: string; append?: boolean; goal?: string; text?: string; content?: string } | undefined;
+            const actionData = action.data as { 
+              goals?: string; 
+              append?: boolean; 
+              goal?: string; 
+              text?: string; 
+              content?: string 
+            } | undefined;
             
             // Try multiple possible field names the AI might use
             let newGoals = actionData?.goals || actionData?.goal || actionData?.text || actionData?.content;
+            const shouldAppend = actionData?.append !== false;
             
             if (!newGoals) {
               console.log('No goals in action data, trying to extract from description:', action.description);
               
               // Try multiple patterns to extract goal content from description
-              // Pattern 1: "Add X to goals" -> extract X
-              // Pattern 2: "Update goals with X" -> extract X
-              // Pattern 3: "Set goals to X" -> extract X
               const patterns = [
                 /add\s+(.+?)\s+to\s+(?:the\s+)?(?:project\s+)?goals?/i,
                 /(?:add|include|set)\s+(?:project\s+)?goals?\s+(?:to\s+)?(?:include\s+)?(.+)/i,
@@ -645,9 +733,8 @@ const DashboardHome: React.FC<DashboardHomeProps> = ({ project, onNavigateToSour
                 const match = action.description?.match(pattern);
                 if (match && match[1] && match[1].trim().length > 2) {
                   newGoals = match[1].trim();
-                  // Clean up common suffixes
                   newGoals = newGoals.replace(/\s+to\s+goals?$/i, '').trim();
-                  console.log('Extracted goal from description with pattern:', pattern, '->', newGoals);
+                  console.log('Extracted goal from description:', newGoals);
                   break;
                 }
               }
@@ -660,8 +747,6 @@ const DashboardHome: React.FC<DashboardHomeProps> = ({ project, onNavigateToSour
                   /(?:add|include|update).*?(?:goal|goals).*?(?:to\s+include\s+|with\s+|:\s*)?(.+?)(?:\.|$)/i,
                   /(?:goal|goals).*?(?:should|to).*?(?:include|add|have)\s+(.+?)(?:\.|$)/i,
                   /(?:include|add)\s+(.+?)\s+(?:to|in).*?(?:goal|goals)/i,
-                  /mobile\s+(?:platform\s+)?support/i,
-                  /(.+?)\s+support$/i
                 ];
                 
                 for (const pattern of userPatterns) {
@@ -681,15 +766,23 @@ const DashboardHome: React.FC<DashboardHomeProps> = ({ project, onNavigateToSour
               break;
             }
             
-            // Append to existing goals
+            // Determine final goals
             const existingGoals = project.goals || '';
-            const finalGoals = existingGoals 
-              ? existingGoals.trim() + '\n\nAdditionally: ' + newGoals.trim()
-              : newGoals.trim();
+            let finalGoals: string;
             
-            console.log('Updating project goals:', { existingGoals, newGoals, finalGoals });
+            if (shouldAppend && existingGoals) {
+              // Check if the new content already includes existing goals (AI might have combined them)
+              if (newGoals.includes(existingGoals.slice(0, 50))) {
+                finalGoals = newGoals;
+              } else {
+                finalGoals = existingGoals.trim() + '\n\nAdditionally: ' + newGoals.trim();
+              }
+            } else {
+              finalGoals = newGoals.trim();
+            }
+            
+            console.log('Updating project goals:', { existingGoals: existingGoals.slice(0, 100), newGoals: newGoals.slice(0, 100) });
             updatedProject = await updateProjectContext({ goals: finalGoals });
-            console.log('Updated project:', updatedProject);
             results.push('Updated project goals');
             await addActivityLog('Updated project goals', 'Clarity AI');
             break;
@@ -697,19 +790,61 @@ const DashboardHome: React.FC<DashboardHomeProps> = ({ project, onNavigateToSour
           
           case 'navigate': {
             const { destination } = action.data as { destination: string };
-            switch (destination) {
-              case 'sources': onNavigateToSources(); break;
-              case 'insights': onNavigateToInsights?.(); break;
-              case 'generate': case 'brd': onNavigateToGenerate?.(); break;
-              case 'graph': onNavigateToGraph?.(); break;
+            const normalizedDest = destination?.toLowerCase?.().trim() || '';
+            let navigated = true;
+            let targetName = destination;
+            
+            switch (normalizedDest) {
+              case 'sources': 
+              case 'data':
+              case 'data sources':
+                onNavigateToSources(); 
+                targetName = 'Data Sources';
+                break;
+              case 'insights': 
+              case 'review':
+                onNavigateToInsights?.(); 
+                targetName = 'Insights Review';
+                break;
+              case 'generate': 
+              case 'brd':
+              case 'document':
+                onNavigateToGenerate?.(); 
+                targetName = 'BRD Generation';
+                break;
+              case 'graph':
+              case 'knowledge graph':
+              case 'visualization':
+                onNavigateToGraph?.(); 
+                targetName = 'Knowledge Graph';
+                break;
+              default:
+                navigated = false;
+                console.warn('Unknown navigation destination:', destination);
             }
-            results.push(`Navigating to ${destination}`);
+            
+            if (navigated) {
+              results.push(`Navigating to ${targetName}`);
+            }
             break;
           }
+          
+          case 'search': {
+            // Search is handled by the AI response, no action needed
+            break;
+          }
+          
+          default:
+            console.warn(`Unknown action type: ${action.type}`);
         }
+        
+        const actionTime = Date.now() - actionStartTime;
+        console.log(`Action ${action.type} completed in ${actionTime}ms`);
+        
       } catch (err) {
+        hasErrors = true;
         console.error(`Failed to execute action ${action.type}:`, err);
-        results.push(`Failed: ${action.description}`);
+        results.push(`Failed: ${action.description || action.type}`);
       }
     }
     
@@ -743,38 +878,58 @@ const DashboardHome: React.FC<DashboardHomeProps> = ({ project, onNavigateToSour
     setIsChatLoading(true);
 
     try {
-      const response = await chatWithClarityActions(
+      // Build comprehensive project context for enterprise chat service
+      const projectContext: ProjectContext = {
+        name: project.name,
+        goals: project.goals,
+        sources: project.sources.map(s => ({ 
+          id: s.id, 
+          name: s.name, 
+          type: s.type,
+          content: s.content 
+        })),
+        insights: project.insights.map(i => ({ 
+          id: i.id,
+          category: i.category, 
+          summary: i.summary, 
+          detail: i.detail,
+          status: i.status,
+          source: i.source
+        })),
+        tasks: project.tasks.map(t => ({ 
+          id: t.id,
+          title: t.title, 
+          type: t.type, 
+          urgency: t.urgency,
+          status: t.status,
+          description: t.description
+        })),
+        brd: project.brd ? {
+          sections: project.brd.sections.map(s => ({
+            id: s.id,
+            title: s.title,
+            content: s.content,
+            status: s.status,
+            confidence: s.confidence
+          })),
+          status: project.brd.status,
+          lastGenerated: project.brd.lastGenerated
+        } : undefined
+      };
+
+      // Use enterprise chat service
+      const response = await clarityChatService.generateResponse(
         userMessage.content,
-        {
-          name: project.name,
-          goals: project.goals,
-          sources: project.sources.map(s => ({ id: s.id, name: s.name, type: s.type })),
-          insights: project.insights.map(i => ({ 
-            id: i.id,
-            category: i.category, 
-            summary: i.summary, 
-            detail: i.detail,
-            status: i.status 
-          })),
-          tasks: project.tasks.map(t => ({ 
-            id: t.id,
-            title: t.title, 
-            type: t.type, 
-            urgency: t.urgency,
-            status: t.status
-          })),
-          brd: project.brd ? {
-            sections: project.brd.sections.map(s => ({
-              id: s.id,
-              title: s.title,
-              content: s.content
-            }))
-          } : undefined
-        },
+        projectContext,
         chatMessages
       );
 
-      console.log('Chat response received:', JSON.stringify(response, null, 2));
+      console.log('Enterprise chat response:', {
+        intent: response.intent,
+        confidence: response.confidence,
+        actionsCount: response.actions.length,
+        processingTime: response.processingMetadata.totalTime
+      });
       
       // Execute any actions from AI response
       let actionResults: string[] = [];
@@ -785,6 +940,12 @@ const DashboardHome: React.FC<DashboardHomeProps> = ({ project, onNavigateToSour
 
       // Build response message with action confirmations
       let finalMessage = response.message;
+      
+      // Add processing metadata for transparency (optional, can be toggled)
+      if (response.processingMetadata.cached) {
+        finalMessage += '\n\n_📦 Retrieved from cache_';
+      }
+      
       if (actionResults.length > 0) {
         finalMessage += '\n\n✅ **Actions completed:**\n' + actionResults.map(r => `• ${r}`).join('\n');
         
@@ -799,9 +960,21 @@ const DashboardHome: React.FC<DashboardHomeProps> = ({ project, onNavigateToSour
       const assistantMessage: ChatMessage = {
         role: 'assistant',
         content: finalMessage,
-        timestamp: new Date().toISOString()
+        timestamp: new Date().toISOString(),
+        metadata: {
+          intent: response.intent,
+          entities: response.entities,
+          confidence: response.confidence,
+          processingTime: response.processingMetadata.totalTime,
+          actionsTaken: actionResults
+        }
       };
       setChatMessages(prev => [...prev, assistantMessage]);
+      
+      // Store suggestions for quick actions
+      if (response.suggestions && response.suggestions.length > 0) {
+        setSuggestedQuestions(response.suggestions);
+      }
     } catch (err) {
       console.error('Chat error:', err);
       setChatMessages(prev => [...prev, {
@@ -1445,6 +1618,27 @@ const DashboardHome: React.FC<DashboardHomeProps> = ({ project, onNavigateToSour
                             <span className="w-2 h-2 bg-blue-500 rounded-full animate-bounce" style={{ animationDelay: '150ms' }}></span>
                             <span className="w-2 h-2 bg-blue-500 rounded-full animate-bounce" style={{ animationDelay: '300ms' }}></span>
                           </div>
+                        </div>
+                      </div>
+                    )}
+                    
+                    {/* Suggested Follow-up Questions */}
+                    {!isChatLoading && suggestedQuestions.length > 0 && chatMessages.length > 0 && (
+                      <div className="mt-4 animate-in fade-in duration-300">
+                        <p className="text-xs text-slate-400 mb-2 ml-1">Suggested follow-ups:</p>
+                        <div className="flex flex-wrap gap-2">
+                          {suggestedQuestions.map((suggestion, idx) => (
+                            <button
+                              key={idx}
+                              onClick={() => {
+                                handleSendChat(suggestion);
+                                setSuggestedQuestions([]);
+                              }}
+                              className="px-3 py-1.5 text-xs bg-slate-50 hover:bg-blue-50 text-slate-600 hover:text-blue-600 rounded-full border border-slate-200 hover:border-blue-200 transition-all"
+                            >
+                              {suggestion}
+                            </button>
+                          ))}
                         </div>
                       </div>
                     )}

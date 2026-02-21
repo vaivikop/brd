@@ -106,6 +106,25 @@ export interface Insight {
   assignedToName?: string;
   discussionRequired?: boolean;
   discussionNotes?: string;
+  
+  // === TRUST SCORE ENGINE v2.0 ===
+  trustScore?: {
+    finalScore: number;                   // 0-100 comprehensive score
+    confidenceLevel: 'very-high' | 'high' | 'medium' | 'low' | 'very-low';
+    factorBreakdown?: {
+      evidenceQuantity: number;
+      sourceReliability: number;
+      linguisticConfidence: number;
+      temporalFreshness: number;
+      stakeholderConsensus: number;
+      crossValidation: number;
+      conflictImpact: number;
+    };
+    warnings?: string[];
+    recommendations?: string[];
+    lastCalculated?: string;
+    volatility?: number;                  // How likely score is to change
+  };
 }
 
 export interface BRDSection {
@@ -348,7 +367,7 @@ export const updateBRD = async (brd: ProjectState['brd'], markInsightsAsUsed: bo
     
     if (brd?.sections && markInsightsAsUsed) {
         brd.sections.forEach(section => {
-            section.sources.forEach(source => {
+            (section.sources || []).forEach(source => {
                 brdSourceNames.add(source.toLowerCase().trim());
                 if (!sectionTitlesBySource.has(source.toLowerCase().trim())) {
                     sectionTitlesBySource.set(source.toLowerCase().trim(), []);
