@@ -47,10 +47,10 @@ const TOAST_ICONS: Record<ToastType, React.ReactNode> = {
 };
 
 const TOAST_STYLES: Record<ToastType, string> = {
-  success: 'bg-white border-emerald-200',
-  error: 'bg-white border-red-200',
-  info: 'bg-white border-blue-200',
-  warning: 'bg-white border-amber-200',
+  success: 'bg-white border-emerald-300 ring-1 ring-emerald-100',
+  error: 'bg-white border-red-300 ring-1 ring-red-100',
+  info: 'bg-white border-blue-300 ring-1 ring-blue-100',
+  warning: 'bg-white border-amber-300 ring-1 ring-amber-100',
 };
 
 interface ToastItemProps {
@@ -66,10 +66,12 @@ const ToastItem: React.FC<ToastItemProps> = ({ toast, onDismiss }) => {
       exit={{ opacity: 0, x: 100, scale: 0.95 }}
       transition={{ type: 'spring', stiffness: 400, damping: 30 }}
       className={`
-        flex items-start gap-3 p-4 rounded-xl border shadow-lg
+        flex items-start gap-3 p-4 rounded-xl border-2 shadow-xl
         ${TOAST_STYLES[toast.type]}
-        min-w-[300px] max-w-[400px]
+        min-w-[320px] max-w-[420px]
+        backdrop-blur-none bg-opacity-100
       `}
+      style={{ backgroundColor: 'white' }}
     >
       <div className="flex-shrink-0 mt-0.5">
         {TOAST_ICONS[toast.type]}
@@ -123,11 +125,16 @@ export const ToastProvider: React.FC<ToastProviderProps> = ({ children }) => {
     <ToastContext.Provider value={{ showToast, hideToast }}>
       {children}
       
-      {/* Toast Container */}
-      <div className="fixed top-4 right-4 z-[9999] flex flex-col gap-2">
+      {/* Toast Container - High z-index for visibility */}
+      <div 
+        className="fixed top-4 right-4 z-[99999] flex flex-col gap-3 pointer-events-none"
+        style={{ isolation: 'isolate' }}
+      >
         <AnimatePresence mode="popLayout">
           {toasts.map((toast) => (
-            <ToastItem key={toast.id} toast={toast} onDismiss={hideToast} />
+            <div key={toast.id} className="pointer-events-auto">
+              <ToastItem toast={toast} onDismiss={hideToast} />
+            </div>
           ))}
         </AnimatePresence>
       </div>

@@ -1,1568 +1,625 @@
 /**
- * TrustScoreEngine - Enterprise-Grade Confidence & Trust Scoring System
+ * TrustScoreEngine v3.0 - Clean, Actionable Trust Scoring
  * 
- * A sophisticated, multi-dimensional trust scoring algorithm that provides:
- * - Explainable trust scores with factor breakdowns
- * - Source reliability weighting
- * - Temporal decay modeling
- * - Cross-validation and corroboration analysis
- * - Linguistic confidence markers detection
- * - Conflict impact assessment
- * - Bayesian score updates
- * - Anomaly detection
- * - Stakeholder consensus tracking
+ * A streamlined trust scoring system that provides:
+ * - Clear, understandable scores (0-100)
+ * - Five key trust dimensions
+ * - Visual feedback with colors/grades
+ * - Actionable recommendations
+ * - Event-based reactivity
  */
 
-import { Insight, Source, SourceReference, Task, ProjectState } from './db';
+import { ProjectState, Insight, Source, BRDSection, Task } from './db';
 
 // ============================================================================
-// TYPES & INTERFACES
+// TYPES
 // ============================================================================
 
-export interface TrustFactor {
+export type TrustGrade = 'A' | 'B' | 'C' | 'D' | 'F';
+export type TrustLevel = 'excellent' | 'good' | 'fair' | 'poor' | 'critical';
+
+export interface TrustDimension {
+  id: string;
   name: string;
-  score: number;        // 0-100
-  weight: number;       // 0-1 (contribution to final score)
-  explanation: string;  // Human-readable explanation
-  details?: Record<string, number | string | boolean | string[]>;
+  score: number;
+  weight: number;
+  icon: string;
+  description: string;
+  tips: string[];
 }
 
-export interface TrustScoreResult {
-  finalScore: number;           // 0-100 weighted final score
-  confidenceLevel: 'very-high' | 'high' | 'medium' | 'low' | 'very-low';
-  factors: TrustFactor[];       // All contributing factors
-  warnings: TrustWarning[];     // Issues detected
-  recommendations: string[];    // Suggested actions
-  metadata: TrustMetadata;
-}
-
-export interface TrustWarning {
-  type: 'conflict' | 'stale-data' | 'single-source' | 'low-authority' | 'ambiguity' | 'inconsistency' | 'missing-validation';
-  severity: 'critical' | 'high' | 'medium' | 'low';
+export interface TrustAlert {
+  id: string;
+  level: 'critical' | 'warning' | 'info';
   message: string;
-  affectedInsights?: string[];
+  action?: string;
 }
 
-export interface TrustMetadata {
+export interface TrustScore {
+  overall: number;
+  grade: TrustGrade;
+  level: TrustLevel;
+  dimensions: TrustDimension[];
+  alerts: TrustAlert[];
+  summary: string;
   calculatedAt: string;
-  version: string;
-  totalFactors: number;
-  dominantFactor: string;
-  confidenceInterval: { low: number; high: number };
-  volatility: number;  // How much the score might change with new evidence
 }
 
-export interface SourceReliability {
-  sourceType: Source['type'];
-  baseReliability: number;  // 0-100
-  factors: {
-    officialRecord: boolean;
-    multipleParticipants: boolean;
-    timestamped: boolean;
-    editable: boolean;
-    verifiable: boolean;
-  };
-}
-
-export interface LinguisticMarker {
-  type: 'certainty' | 'hedging' | 'assertion' | 'ambiguity';
+export interface TrustColors {
+  bg: string;
   text: string;
-  impact: number;
-}
-
-export interface LinguisticMarkers {
-  certaintyScore: number;
-  hedgingScore: number;
-  assertivenessScore: number;
-  ambiguityScore: number;
-  markers: LinguisticMarker[];
-}
-
-export interface TemporalAnalysis {
-  ageInDays: number;
-  decayFactor: number;
-  isStale: boolean;
-  freshnessScore: number;
-  lastValidationDate?: string;
-}
-
-export interface ConsensusAnalysis {
-  agreementScore: number;
-  stakeholderCount: number;
-  sourceTypeCount: number;
-  conflictCount: number;
-  corroborationLevel: 'strong' | 'moderate' | 'weak' | 'none';
-}
-
-// ============================================================================
-// CONSTANTS & CONFIGURATION
-// ============================================================================
-
-const ENGINE_VERSION = '2.0.0';
-
-// Source reliability base scores (can be customized per organization)
-const SOURCE_RELIABILITY_MAP: Record<Source['type'], SourceReliability> = {
-  meeting: {
-    sourceType: 'meeting',
-    baseReliability: 85,
-    factors: {
-      officialRecord: true,
-      multipleParticipants: true,
-      timestamped: true,
-      editable: false,
-      verifiable: true
-    }
-  },
-  email: {
-    sourceType: 'email',
-    baseReliability: 80,
-    factors: {
-      officialRecord: true,
-      multipleParticipants: false,
-      timestamped: true,
-      editable: false,
-      verifiable: true
-    }
-  },
-  slack: {
-    sourceType: 'slack',
-    baseReliability: 60,
-    factors: {
-      officialRecord: false,
-      multipleParticipants: true,
-      timestamped: true,
-      editable: true,
-      verifiable: false
-    }
-  },
-  jira: {
-    sourceType: 'jira',
-    baseReliability: 90,
-    factors: {
-      officialRecord: true,
-      multipleParticipants: false,
-      timestamped: true,
-      editable: true,
-      verifiable: true
-    }
-  },
-  upload: {
-    sourceType: 'upload',
-    baseReliability: 70,
-    factors: {
-      officialRecord: false,
-      multipleParticipants: false,
-      timestamped: false,
-      editable: true,
-      verifiable: false
-    }
-  },
-  chat: {
-    sourceType: 'chat',
-    baseReliability: 50,
-    factors: {
-      officialRecord: false,
-      multipleParticipants: true,
-      timestamped: true,
-      editable: false,
-      verifiable: false
-    }
-  }
-};
-
-// Linguistic markers for confidence analysis
-const CERTAINTY_MARKERS = [
-  { pattern: /\b(definitely|certainly|absolutely|clearly|obviously|undoubtedly|must|will)\b/gi, impact: 15 },
-  { pattern: /\b(confirmed|agreed|decided|approved|verified|validated)\b/gi, impact: 20 },
-  { pattern: /\b(required|mandatory|essential|critical|necessary)\b/gi, impact: 12 },
-  { pattern: /\b(always|never|every|all|none)\b/gi, impact: 8 }
-];
-
-const HEDGING_MARKERS = [
-  { pattern: /\b(maybe|perhaps|possibly|probably|might|could|may)\b/gi, impact: -15 },
-  { pattern: /\b(seems|appears|looks like|think|believe|suggest)\b/gi, impact: -10 },
-  { pattern: /\b(not sure|uncertain|unclear|ambiguous|tentative)\b/gi, impact: -20 },
-  { pattern: /\b(approximately|around|roughly|about|estimate)\b/gi, impact: -8 }
-];
-
-const AMBIGUITY_MARKERS = [
-  { pattern: /\b(some|few|many|several|various|etc\.?|and so on)\b/gi, impact: -10 },
-  { pattern: /\b(tbd|to be determined|to be decided|pending|later)\b/gi, impact: -25 },
-  { pattern: /\b(as needed|when required|if necessary|as applicable)\b/gi, impact: -15 },
-  { pattern: /\?\s*$/gm, impact: -20 }  // Questions indicate uncertainty
-];
-
-// Temporal decay configuration
-const TEMPORAL_CONFIG = {
-  halfLifeDays: 30,       // Score halves every 30 days without validation
-  staleThresholdDays: 90, // Data older than 90 days is considered stale
-  freshnessBoostDays: 7,  // Data within 7 days gets a freshness boost
-  maxDecay: 0.3           // Maximum decay factor (score can't drop below 30% due to age alone)
-};
-
-// Weight configuration for final score calculation
-const FACTOR_WEIGHTS = {
-  evidenceQuantity: 0.20,
-  sourceReliability: 0.18,
-  linguisticConfidence: 0.15,
-  temporalFreshness: 0.12,
-  stakeholderConsensus: 0.15,
-  crossValidation: 0.10,
-  conflictImpact: 0.10      // Negative weight (penalty)
-};
-
-// ============================================================================
-// CORE ENGINE CLASS
-// ============================================================================
-
-export class TrustScoreEngine {
-  private customSourceReliability: Partial<Record<Source['type'], number>> = {};
-  private historicalScores: Map<string, number[]> = new Map();
-
-  constructor(customConfig?: {
-    sourceReliability?: Partial<Record<Source['type'], number>>;
-  }) {
-    if (customConfig?.sourceReliability) {
-      this.customSourceReliability = customConfig.sourceReliability;
-    }
-  }
-
-  // =========================================================================
-  // MAIN CALCULATION METHODS
-  // =========================================================================
-
-  /**
-   * Calculate comprehensive trust score for a single insight
-   */
-  calculateInsightTrustScore(
-    insight: Insight,
-    allInsights: Insight[] = [],
-    sources: Source[] = []
-  ): TrustScoreResult {
-    const factors: TrustFactor[] = [];
-    const warnings: TrustWarning[] = [];
-    const recommendations: string[] = [];
-
-    // 1. Evidence Quantity Factor
-    const evidenceFactor = this.calculateEvidenceFactor(insight);
-    factors.push(evidenceFactor);
-
-    // 2. Source Reliability Factor
-    const sourceFactor = this.calculateSourceReliabilityFactor(insight, sources);
-    factors.push(sourceFactor);
-
-    // 3. Linguistic Confidence Factor
-    const linguisticFactor = this.calculateLinguisticFactor(insight);
-    factors.push(linguisticFactor);
-
-    // 4. Temporal Freshness Factor
-    const temporalFactor = this.calculateTemporalFactor(insight);
-    factors.push(temporalFactor);
-
-    // 5. Stakeholder Consensus Factor
-    const consensusFactor = this.calculateConsensusFactor(insight, allInsights);
-    factors.push(consensusFactor);
-
-    // 6. Cross-Validation Factor
-    const crossValidationFactor = this.calculateCrossValidationFactor(insight, allInsights);
-    factors.push(crossValidationFactor);
-
-    // 7. Conflict Impact Factor (Penalty)
-    const conflictFactor = this.calculateConflictFactor(insight, allInsights);
-    factors.push(conflictFactor);
-
-    // Calculate weighted final score
-    const finalScore = this.calculateWeightedScore(factors);
-
-    // Generate warnings
-    warnings.push(...this.generateWarnings(insight, factors, allInsights));
-
-    // Generate recommendations
-    recommendations.push(...this.generateRecommendations(factors, warnings));
-
-    // Determine confidence level
-    const confidenceLevel = this.scoreToConfidenceLevel(finalScore);
-
-    // Calculate metadata
-    const metadata = this.calculateMetadata(factors, finalScore);
-
-    // Store historical score for volatility tracking
-    this.updateHistoricalScore(insight.id, finalScore);
-
-    return {
-      finalScore: Math.round(finalScore),
-      confidenceLevel,
-      factors,
-      warnings,
-      recommendations,
-      metadata
-    };
-  }
-
-  /**
-   * Calculate aggregated trust score for entire project
-   */
-  calculateProjectTrustScore(project: ProjectState): TrustScoreResult {
-    const factors: TrustFactor[] = [];
-    const warnings: TrustWarning[] = [];
-    const recommendations: string[] = [];
-
-    const insights = project.insights || [];
-    const sources = project.sources || [];
-    const sections = project.brd?.sections || [];
-    const tasks = project.tasks || [];
-
-    // 1. Insight Coverage Factor
-    const coverageFactor = this.calculateInsightCoverageFactor(insights, sources);
-    factors.push(coverageFactor);
-
-    // 2. Source Diversity Factor  
-    const diversityFactor = this.calculateSourceDiversityFactor(sources);
-    factors.push(diversityFactor);
-
-    // 3. BRD Completeness Factor
-    const brdFactor = this.calculateBRDCompletenessFactor(sections, insights);
-    factors.push(brdFactor);
-
-    // 4. Task Resolution Factor
-    const taskFactor = this.calculateTaskResolutionFactor(tasks);
-    factors.push(taskFactor);
-
-    // 5. Aggregate Insight Confidence
-    const insightConfidenceFactor = this.calculateAggregateInsightConfidence(insights, sources);
-    factors.push(insightConfidenceFactor);
-
-    // 6. Stakeholder Engagement Factor
-    const stakeholderFactor = this.calculateStakeholderEngagementFactor(insights);
-    factors.push(stakeholderFactor);
-
-    // Calculate weighted final score
-    const finalScore = this.calculateProjectWeightedScore(factors);
-
-    // Generate project-level warnings
-    warnings.push(...this.generateProjectWarnings(project, factors));
-
-    // Generate recommendations
-    recommendations.push(...this.generateProjectRecommendations(factors, warnings));
-
-    const confidenceLevel = this.scoreToConfidenceLevel(finalScore);
-    const metadata = this.calculateMetadata(factors, finalScore);
-
-    return {
-      finalScore: Math.round(finalScore),
-      confidenceLevel,
-      factors,
-      warnings,
-      recommendations,
-      metadata
-    };
-  }
-
-  // =========================================================================
-  // INDIVIDUAL FACTOR CALCULATIONS
-  // =========================================================================
-
-  private calculateEvidenceFactor(insight: Insight): TrustFactor {
-    const evidenceCount = insight.evidenceCount || 1;
-    const supportingSources = insight.supportingSources?.length || 0;
-    
-    // Logarithmic scaling to prevent gaming by adding many weak sources
-    // 1 source = 40, 2 sources = 60, 3 sources = 72, 5+ sources = 85+
-    const baseScore = Math.min(95, 40 + (Math.log2(evidenceCount + 1) * 25));
-    
-    // Bonus for diverse source types
-    const sourceTypes = new Set(insight.supportingSources?.map(s => s.sourceType) || [insight.sourceType]);
-    const diversityBonus = Math.min(15, (sourceTypes.size - 1) * 5);
-    
-    const score = Math.min(100, baseScore + diversityBonus);
-
-    return {
-      name: 'Evidence Quantity',
-      score,
-      weight: FACTOR_WEIGHTS.evidenceQuantity,
-      explanation: `Based on ${evidenceCount} source(s) with ${sourceTypes.size} unique type(s)`,
-      details: {
-        evidenceCount,
-        supportingSources,
-        sourceTypeDiversity: sourceTypes.size,
-        diversityBonus
-      }
-    };
-  }
-
-  private calculateSourceReliabilityFactor(insight: Insight, sources: Source[]): TrustFactor {
-    const sourceType = insight.sourceType;
-    const baseReliability = this.customSourceReliability[sourceType] 
-      ?? SOURCE_RELIABILITY_MAP[sourceType]?.baseReliability 
-      ?? 50;
-    
-    // Check for supporting sources with different reliability levels
-    let weightedReliability = baseReliability;
-    if (insight.supportingSources && insight.supportingSources.length > 0) {
-      const reliabilities = insight.supportingSources.map(s => 
-        this.customSourceReliability[s.sourceType] ?? SOURCE_RELIABILITY_MAP[s.sourceType]?.baseReliability ?? 50
-      );
-      // Use weighted average favoring higher reliability sources
-      weightedReliability = reliabilities.reduce((sum, r) => sum + r, baseReliability) / (reliabilities.length + 1);
-      // Bonus for having high-reliability sources
-      const hasHighReliability = reliabilities.some(r => r >= 85);
-      if (hasHighReliability) {
-        weightedReliability = Math.min(100, weightedReliability + 10);
-      }
-    }
-
-    const reliabilityInfo = SOURCE_RELIABILITY_MAP[sourceType];
-    const factors = reliabilityInfo?.factors;
-
-    return {
-      name: 'Source Reliability',
-      score: Math.round(weightedReliability),
-      weight: FACTOR_WEIGHTS.sourceReliability,
-      explanation: `Primary source type "${sourceType}" has base reliability of ${baseReliability}%`,
-      details: {
-        primarySourceType: sourceType,
-        baseReliability,
-        adjustedReliability: weightedReliability,
-        isOfficialRecord: factors?.officialRecord ?? false,
-        isVerifiable: factors?.verifiable ?? false,
-        isEditable: factors?.editable ?? true
-      }
-    };
-  }
-
-  private calculateLinguisticFactor(insight: Insight): TrustFactor {
-    const text = `${insight.summary} ${insight.detail}`.toLowerCase();
-    const analysis = this.analyzeLinguisticMarkers(text);
-    
-    // Base score of 50, modified by linguistic markers
-    let score = 50 + analysis.certaintyScore + analysis.hedgingScore + analysis.ambiguityScore;
-    score = Math.max(0, Math.min(100, score));
-
-    const dominantTone = analysis.certaintyScore > Math.abs(analysis.hedgingScore) 
-      ? 'assertive' 
-      : analysis.hedgingScore < -10 
-        ? 'hedging' 
-        : 'neutral';
-
-    return {
-      name: 'Linguistic Confidence',
-      score: Math.round(score),
-      weight: FACTOR_WEIGHTS.linguisticConfidence,
-      explanation: `Language analysis indicates ${dominantTone} tone with ${analysis.markers.length} key markers detected`,
-      details: {
-        certaintyImpact: analysis.certaintyScore,
-        hedgingImpact: analysis.hedgingScore,
-        ambiguityImpact: analysis.ambiguityScore,
-        dominantTone,
-        markerCount: analysis.markers.length
-      }
-    };
-  }
-
-  private calculateTemporalFactor(insight: Insight): TrustFactor {
-    const analysis = this.analyzeTemporalRelevance(insight.timestamp);
-    
-    // Fresh data gets bonus, old data gets penalty
-    let score = 70; // Base score
-    
-    if (analysis.ageInDays <= TEMPORAL_CONFIG.freshnessBoostDays) {
-      score = 90 + (TEMPORAL_CONFIG.freshnessBoostDays - analysis.ageInDays);
-    } else {
-      score = Math.max(30, 90 - (analysis.ageInDays * 0.5));
-    }
-    
-    score = score * analysis.decayFactor;
-
-    return {
-      name: 'Temporal Freshness',
-      score: Math.round(Math.max(20, Math.min(100, score))),
-      weight: FACTOR_WEIGHTS.temporalFreshness,
-      explanation: analysis.isStale 
-        ? `Data is ${Math.round(analysis.ageInDays)} days old (stale threshold: ${TEMPORAL_CONFIG.staleThresholdDays} days)`
-        : `Data is ${Math.round(analysis.ageInDays)} days old with freshness score of ${Math.round(analysis.freshnessScore)}%`,
-      details: {
-        ageInDays: Math.round(analysis.ageInDays),
-        decayFactor: analysis.decayFactor,
-        isStale: analysis.isStale,
-        freshnessScore: analysis.freshnessScore
-      }
-    };
-  }
-
-  private calculateConsensusFactor(insight: Insight, allInsights: Insight[]): TrustFactor {
-    const analysis = this.analyzeStakeholderConsensus(insight, allInsights);
-    
-    let score = 50; // Base score
-    
-    // Multiple stakeholders mentioning same thing increases confidence
-    score += Math.min(30, analysis.stakeholderCount * 10);
-    
-    // Multiple source types increases confidence
-    score += Math.min(15, (analysis.sourceTypeCount - 1) * 5);
-    
-    // Conflicts decrease confidence
-    score -= analysis.conflictCount * 15;
-    
-    score = Math.max(0, Math.min(100, score));
-
-    return {
-      name: 'Stakeholder Consensus',
-      score: Math.round(score),
-      weight: FACTOR_WEIGHTS.stakeholderConsensus,
-      explanation: `${analysis.stakeholderCount} stakeholder(s), ${analysis.sourceTypeCount} source type(s), ${analysis.conflictCount} conflict(s). Corroboration: ${analysis.corroborationLevel}`,
-      details: {
-        stakeholderCount: analysis.stakeholderCount,
-        sourceTypeCount: analysis.sourceTypeCount,
-        conflictCount: analysis.conflictCount,
-        corroborationLevel: analysis.corroborationLevel,
-        agreementScore: analysis.agreementScore
-      }
-    };
-  }
-
-  private calculateCrossValidationFactor(insight: Insight, allInsights: Insight[]): TrustFactor {
-    // Find similar insights that corroborate this one
-    const similarInsights = this.findCorroboratingInsights(insight, allInsights);
-    const corroborationCount = similarInsights.length;
-    
-    // Calculate cross-validation score
-    let score = 40; // Base score (single source)
-    
-    if (corroborationCount > 0) {
-      // Each corroborating insight adds confidence
-      score += Math.min(50, corroborationCount * 15);
-      
-      // Bonus if corroborating insights come from different sources
-      const uniqueSources = new Set(similarInsights.map(i => i.source));
-      if (uniqueSources.size > 1) {
-        score += 10;
-      }
-    }
-    
-    score = Math.min(100, score);
-
-    return {
-      name: 'Cross-Validation',
-      score: Math.round(score),
-      weight: FACTOR_WEIGHTS.crossValidation,
-      explanation: corroborationCount > 0 
-        ? `Corroborated by ${corroborationCount} similar insight(s) from ${new Set(similarInsights.map(i => i.source)).size} source(s)`
-        : 'No corroborating insights found - single source only',
-      details: {
-        corroboratingInsights: corroborationCount,
-        uniqueCorroboratingSources: new Set(similarInsights.map(i => i.source)).size
-      }
-    };
-  }
-
-  private calculateConflictFactor(insight: Insight, allInsights: Insight[]): TrustFactor {
-    const conflictIds = insight.conflictingInsightIds || [];
-    const hasConflicts = insight.hasConflicts || conflictIds.length > 0;
-    
-    // Start with perfect score, subtract for conflicts
-    let score = 100;
-    
-    if (hasConflicts) {
-      // Each conflict reduces score significantly
-      score -= conflictIds.length * 25;
-      
-      // Check conflict severity based on conflicting insight confidence
-      for (const conflictId of conflictIds) {
-        const conflictingInsight = allInsights.find(i => i.id === conflictId);
-        if (conflictingInsight) {
-          // High-confidence conflicts are worse
-          const conflictConfidence = conflictingInsight.confidenceScore || 50;
-          if (conflictConfidence > 70) {
-            score -= 10; // Additional penalty for high-confidence conflicts
-          }
-        }
-      }
-    }
-    
-    score = Math.max(0, score);
-
-    return {
-      name: 'Conflict Impact',
-      score: Math.round(score),
-      weight: FACTOR_WEIGHTS.conflictImpact,
-      explanation: hasConflicts 
-        ? `${conflictIds.length} conflicting insight(s) detected - requires resolution`
-        : 'No conflicts detected with other insights',
-      details: {
-        hasConflicts,
-        conflictCount: conflictIds.length,
-        conflictingIds: conflictIds
-      }
-    };
-  }
-
-  // =========================================================================
-  // PROJECT-LEVEL FACTOR CALCULATIONS
-  // =========================================================================
-
-  private calculateInsightCoverageFactor(insights: Insight[], sources: Source[]): TrustFactor {
-    const approvedInsights = insights.filter(i => i.status === 'approved');
-    const totalSources = sources.length;
-    
-    // Calculate insights per source ratio
-    const insightsPerSource = totalSources > 0 ? insights.length / totalSources : 0;
-    const approvalRate = insights.length > 0 ? approvedInsights.length / insights.length : 0;
-    
-    // Fair scoring: having data at all is good, more data is better
-    // Base 60 just for having insights, bonuses for good ratios
-    let score = 55;
-    
-    // Bonus for having any insights at all
-    if (insights.length > 0) score += 15;
-    
-    // Additional bonus for good insight density
-    if (insightsPerSource >= 3 && insightsPerSource <= 15) {
-      score += 15;
-    } else if (insightsPerSource > 0) {
-      score += 8;
-    }
-    
-    // Bonus for approved insights (not required for good score)
-    score += approvalRate * 15;
-
-    return {
-      name: 'Insight Coverage',
-      score: Math.round(Math.min(100, score)),
-      weight: 0.20,
-      explanation: `${insights.length} insights from ${totalSources} sources (${Math.round(approvalRate * 100)}% approved)`,
-      details: {
-        totalInsights: insights.length,
-        approvedInsights: approvedInsights.length,
-        totalSources,
-        insightsPerSource: Math.round(insightsPerSource * 10) / 10,
-        approvalRate: Math.round(approvalRate * 100)
-      }
-    };
-  }
-
-  private calculateSourceDiversityFactor(sources: Source[]): TrustFactor {
-    const sourceTypes = new Set(sources.map(s => s.type));
-    const typeCount = sourceTypes.size;
-    
-    // Fair scoring: having sources is good, diversity is bonus
-    // Base 55 for having any sources, +15 per type
-    let score = sources.length > 0 ? 55 : 40;
-    score += (typeCount * 12);
-    
-    // Bonus for having high-reliability source types
-    const hasOfficialSources = sources.some(s => 
-      ['meeting', 'email', 'jira'].includes(s.type)
-    );
-    if (hasOfficialSources) {
-      score += 12;
-    }
-    
-    // Bonus for having multiple sources
-    if (sources.length >= 3) score += 8;
-    if (sources.length >= 5) score += 5;
-    
-    score = Math.min(100, score);
-
-    return {
-      name: 'Source Diversity',
-      score: Math.round(score),
-      weight: 0.15,
-      explanation: `${typeCount} different source type(s) connected: ${Array.from(sourceTypes).join(', ')}`,
-      details: {
-        sourceTypeCount: typeCount,
-        sourceTypes: Array.from(sourceTypes),
-        hasOfficialSources
-      }
-    };
-  }
-
-  private calculateBRDCompletenessFactor(sections: any[], insights: Insight[]): TrustFactor {
-    if (sections.length === 0) {
-      // No BRD yet - but that's okay if you have insights to generate from
-      const baseScore = insights.length > 0 ? 55 : 40;
-      return {
-        name: 'BRD Completeness',
-        score: baseScore,
-        weight: 0.20,
-        explanation: insights.length > 0 
-          ? 'BRD not generated yet - insights ready for generation'
-          : 'Ready to generate BRD when insights are available',
-        details: { sectionsGenerated: 0, avgSectionConfidence: 0 }
-      };
-    }
-    
-    const avgConfidence = sections.reduce((sum, s) => sum + (s.confidence || 0), 0) / sections.length;
-    const approvedSections = sections.filter((s: any) => s.approval?.status === 'approved').length;
-    const approvalRate = approvedSections / sections.length;
-    
-    // Having sections at all is great - base 65, plus bonuses
-    let score = 65 + avgConfidence * 100 * 0.25 + approvalRate * 10;
-
-    return {
-      name: 'BRD Completeness',
-      score: Math.round(Math.min(100, score)),
-      weight: 0.20,
-      explanation: `${sections.length} sections with ${Math.round(avgConfidence * 100)}% avg confidence, ${Math.round(approvalRate * 100)}% approved`,
-      details: {
-        sectionsGenerated: sections.length,
-        avgSectionConfidence: Math.round(avgConfidence * 100),
-        approvedSections,
-        approvalRate: Math.round(approvalRate * 100)
-      }
-    };
-  }
-
-  private calculateTaskResolutionFactor(tasks: Task[]): TrustFactor {
-    const totalTasks = tasks.length;
-    const completedTasks = tasks.filter(t => t.status === 'completed').length;
-    const criticalPending = tasks.filter(t => 
-      t.status === 'pending' && t.urgency === 'high'
-    ).length;
-    
-    // High score when tasks are resolved
-    let score = 100;
-    
-    if (totalTasks > 0) {
-      const resolutionRate = completedTasks / totalTasks;
-      score = resolutionRate * 70 + 30;
-      
-      // Penalty for critical pending tasks
-      score -= criticalPending * 15;
-    }
-
-    return {
-      name: 'Task Resolution',
-      score: Math.round(Math.max(0, Math.min(100, score))),
-      weight: 0.15,
-      explanation: totalTasks > 0 
-        ? `${completedTasks}/${totalTasks} tasks resolved, ${criticalPending} critical pending`
-        : 'No outstanding tasks',
-      details: {
-        totalTasks,
-        completedTasks,
-        criticalPending,
-        resolutionRate: totalTasks > 0 ? Math.round((completedTasks / totalTasks) * 100) : 100
-      }
-    };
-  }
-
-  private calculateAggregateInsightConfidence(insights: Insight[], sources: Source[]): TrustFactor {
-    if (insights.length === 0) {
-      // No insights yet - fair score, project is starting
-      const baseScore = sources.length > 0 ? 55 : 45;
-      return {
-        name: 'Aggregate Insight Confidence',
-        score: baseScore,
-        weight: 0.15,
-        explanation: sources.length > 0 
-          ? 'Sources connected - ready for insight extraction'
-          : 'Add sources to begin insight extraction',
-        details: { avgConfidence: 0, highConfidenceCount: 0 }
-      };
-    }
-    
-    // Calculate individual trust scores for all insights
-    const confidenceScores = insights.map(i => i.confidenceScore || 60);
-    const avgScore = confidenceScores.reduce((sum, s) => sum + s, 0) / confidenceScores.length;
-    const highConfidenceCount = confidenceScores.filter(s => s >= 70).length;
-    const lowConfidenceCount = confidenceScores.filter(s => s < 40).length;
-    
-    // Fair base + weighted average favoring high-confidence insights  
-    let score = Math.max(avgScore, 55); // Minimum 55 if you have insights
-    
-    // Bonus for high-confidence insights
-    score += (highConfidenceCount / insights.length) * 12;
-    
-    // Small penalty only if majority are low-confidence
-    if (lowConfidenceCount > insights.length * 0.5) {
-      score -= 5;
-    }
-
-    return {
-      name: 'Aggregate Insight Confidence',
-      score: Math.round(Math.min(100, score)),
-      weight: 0.15,
-      explanation: `Average confidence: ${Math.round(avgScore)}%, ${highConfidenceCount} high-confidence, ${lowConfidenceCount} low-confidence`,
-      details: {
-        avgConfidence: Math.round(avgScore),
-        highConfidenceCount,
-        lowConfidenceCount,
-        totalInsights: insights.length
-      }
-    };
-  }
-
-  private calculateStakeholderEngagementFactor(insights: Insight[]): TrustFactor {
-    const stakeholderInsights = insights.filter(i => i.category === 'stakeholder');
-    const decisionInsights = insights.filter(i => i.category === 'decision');
-    const allStakeholders = new Set<string>();
-    
-    insights.forEach(i => {
-      i.stakeholderMentions?.forEach(s => allStakeholders.add(s));
-    });
-    
-    const stakeholderCount = allStakeholders.size;
-    
-    // Fair base score - having any insights shows engagement
-    let score = insights.length > 0 ? 55 : 45;
-    score += Math.min(20, stakeholderInsights.length * 8);
-    score += Math.min(15, decisionInsights.length * 5);
-    score += Math.min(15, stakeholderCount * 5);
-
-    return {
-      name: 'Stakeholder Engagement',
-      score: Math.round(Math.min(100, score)),
-      weight: 0.15,
-      explanation: `${stakeholderCount} stakeholder(s) identified, ${stakeholderInsights.length} stakeholder insights, ${decisionInsights.length} decisions`,
-      details: {
-        uniqueStakeholders: stakeholderCount,
-        stakeholderInsights: stakeholderInsights.length,
-        decisionInsights: decisionInsights.length
-      }
-    };
-  }
-
-  // =========================================================================
-  // HELPER METHODS
-  // =========================================================================
-
-  private analyzeLinguisticMarkers(text: string): LinguisticMarkers {
-    let certaintyScore = 0;
-    let hedgingScore = 0;
-    let ambiguityScore = 0;
-    const markers: LinguisticMarker[] = [];
-
-    for (const marker of CERTAINTY_MARKERS) {
-      const matches = text.match(marker.pattern);
-      if (matches) {
-        certaintyScore += marker.impact * matches.length;
-        matches.forEach(m => markers.push({ type: 'certainty', text: m, impact: marker.impact }));
-      }
-    }
-
-    for (const marker of HEDGING_MARKERS) {
-      const matches = text.match(marker.pattern);
-      if (matches) {
-        hedgingScore += marker.impact * matches.length;
-        matches.forEach(m => markers.push({ type: 'hedging', text: m, impact: marker.impact }));
-      }
-    }
-
-    for (const marker of AMBIGUITY_MARKERS) {
-      const matches = text.match(marker.pattern);
-      if (matches) {
-        ambiguityScore += marker.impact * matches.length;
-        matches.forEach(m => markers.push({ type: 'ambiguity', text: m, impact: marker.impact }));
-      }
-    }
-
-    // Normalize scores to prevent extreme values
-    certaintyScore = Math.min(30, certaintyScore);
-    hedgingScore = Math.max(-30, hedgingScore);
-    ambiguityScore = Math.max(-30, ambiguityScore);
-
-    return {
-      certaintyScore,
-      hedgingScore,
-      assertivenessScore: certaintyScore + hedgingScore,
-      ambiguityScore,
-      markers
-    };
-  }
-
-  private analyzeTemporalRelevance(timestamp: string): TemporalAnalysis {
-    const insightDate = new Date(timestamp);
-    const now = new Date();
-    const ageInDays = (now.getTime() - insightDate.getTime()) / (1000 * 60 * 60 * 24);
-    
-    // Exponential decay based on age
-    const decayFactor = Math.max(
-      TEMPORAL_CONFIG.maxDecay,
-      Math.pow(0.5, ageInDays / TEMPORAL_CONFIG.halfLifeDays)
-    );
-    
-    const isStale = ageInDays > TEMPORAL_CONFIG.staleThresholdDays;
-    
-    // Freshness score for UI display
-    let freshnessScore = 100;
-    if (ageInDays <= TEMPORAL_CONFIG.freshnessBoostDays) {
-      freshnessScore = 100;
-    } else if (ageInDays <= 30) {
-      freshnessScore = 90 - (ageInDays - TEMPORAL_CONFIG.freshnessBoostDays);
-    } else if (ageInDays <= 90) {
-      freshnessScore = 70 - ((ageInDays - 30) * 0.5);
-    } else {
-      freshnessScore = Math.max(20, 40 - ((ageInDays - 90) * 0.2));
-    }
-
-    return {
-      ageInDays,
-      decayFactor,
-      isStale,
-      freshnessScore
-    };
-  }
-
-  private analyzeStakeholderConsensus(insight: Insight, allInsights: Insight[]): ConsensusAnalysis {
-    const stakeholders = new Set(insight.stakeholderMentions || []);
-    const sourceTypes = new Set([insight.sourceType, ...(insight.supportingSources?.map(s => s.sourceType) || [])]);
-    const conflicts = insight.conflictingInsightIds || [];
-    
-    // Find similar insights to check for agreement
-    const similarInsights = this.findCorroboratingInsights(insight, allInsights);
-    
-    // Calculate agreement score based on corroboration
-    let agreementScore = 50;
-    if (similarInsights.length > 0) {
-      agreementScore += Math.min(40, similarInsights.length * 15);
-    }
-    if (conflicts.length > 0) {
-      agreementScore -= conflicts.length * 20;
-    }
-    agreementScore = Math.max(0, Math.min(100, agreementScore));
-
-    // Determine corroboration level
-    let corroborationLevel: ConsensusAnalysis['corroborationLevel'] = 'none';
-    if (similarInsights.length >= 3 || (similarInsights.length >= 2 && stakeholders.size >= 2)) {
-      corroborationLevel = 'strong';
-    } else if (similarInsights.length >= 2 || stakeholders.size >= 2) {
-      corroborationLevel = 'moderate';
-    } else if (similarInsights.length >= 1 || stakeholders.size >= 1) {
-      corroborationLevel = 'weak';
-    }
-
-    return {
-      agreementScore,
-      stakeholderCount: stakeholders.size,
-      sourceTypeCount: sourceTypes.size,
-      conflictCount: conflicts.length,
-      corroborationLevel
-    };
-  }
-
-  private findCorroboratingInsights(insight: Insight, allInsights: Insight[]): Insight[] {
-    return allInsights.filter(other => {
-      if (other.id === insight.id) return false;
-      if (other.category !== insight.category) return false;
-      
-      // Calculate similarity
-      const similarity = this.calculateTextSimilarity(
-        `${insight.summary} ${insight.detail}`,
-        `${other.summary} ${other.detail}`
-      );
-      
-      // Consider corroborating if similarity is 40-90% (too high = duplicate)
-      return similarity >= 0.4 && similarity <= 0.9;
-    });
-  }
-
-  private calculateTextSimilarity(text1: string, text2: string): number {
-    const words1 = new Set(text1.toLowerCase().split(/\s+/).filter(w => w.length > 3));
-    const words2 = new Set(text2.toLowerCase().split(/\s+/).filter(w => w.length > 3));
-    
-    const intersection = new Set([...words1].filter(x => words2.has(x)));
-    const union = new Set([...words1, ...words2]);
-    
-    return union.size === 0 ? 0 : intersection.size / union.size;
-  }
-
-  private calculateWeightedScore(factors: TrustFactor[]): number {
-    let totalWeight = 0;
-    let weightedSum = 0;
-    
-    for (const factor of factors) {
-      weightedSum += factor.score * factor.weight;
-      totalWeight += factor.weight;
-    }
-    
-    return totalWeight > 0 ? weightedSum / totalWeight : 50;
-  }
-
-  private calculateProjectWeightedScore(factors: TrustFactor[]): number {
-    return this.calculateWeightedScore(factors);
-  }
-
-  private scoreToConfidenceLevel(score: number): TrustScoreResult['confidenceLevel'] {
-    // Fair thresholds that recognize progress at all stages
-    if (score >= 80) return 'very-high';
-    if (score >= 65) return 'high';
-    if (score >= 50) return 'medium';
-    if (score >= 35) return 'low';
-    return 'very-low';
-  }
-
-  private generateWarnings(insight: Insight, factors: TrustFactor[], allInsights: Insight[]): TrustWarning[] {
-    const warnings: TrustWarning[] = [];
-    
-    // Check for conflicts
-    if (insight.hasConflicts || (insight.conflictingInsightIds?.length || 0) > 0) {
-      warnings.push({
-        type: 'conflict',
-        severity: 'high',
-        message: `This insight conflicts with ${insight.conflictingInsightIds?.length || 1} other insight(s). Resolution required.`,
-        affectedInsights: insight.conflictingInsightIds
-      });
-    }
-    
-    // Check for stale data
-    const temporalFactor = factors.find(f => f.name === 'Temporal Freshness');
-    if (temporalFactor && temporalFactor.details?.isStale) {
-      warnings.push({
-        type: 'stale-data',
-        severity: 'medium',
-        message: `Data is ${temporalFactor.details.ageInDays} days old. Consider re-validating with stakeholders.`
-      });
-    }
-    
-    // Check for single source
-    const evidenceFactor = factors.find(f => f.name === 'Evidence Quantity');
-    if (evidenceFactor && (evidenceFactor.details?.evidenceCount as number || 1) === 1) {
-      warnings.push({
-        type: 'single-source',
-        severity: 'medium',
-        message: 'Based on a single source. Cross-validation recommended.'
-      });
-    }
-    
-    // Check for low linguistic confidence
-    const linguisticFactor = factors.find(f => f.name === 'Linguistic Confidence');
-    if (linguisticFactor && linguisticFactor.score < 40) {
-      warnings.push({
-        type: 'ambiguity',
-        severity: 'medium',
-        message: 'Language analysis indicates high uncertainty or ambiguity in source material.'
-      });
-    }
-
-    return warnings;
-  }
-
-  private generateProjectWarnings(project: ProjectState, factors: TrustFactor[]): TrustWarning[] {
-    const warnings: TrustWarning[] = [];
-    
-    // Check source diversity
-    const diversityFactor = factors.find(f => f.name === 'Source Diversity');
-    if (diversityFactor && diversityFactor.score < 50) {
-      warnings.push({
-        type: 'single-source',
-        severity: 'medium',
-        message: 'Limited source diversity. Consider adding more source types for validation.'
-      });
-    }
-    
-    // Check for unresolved critical tasks
-    const taskFactor = factors.find(f => f.name === 'Task Resolution');
-    if (taskFactor && (taskFactor.details?.criticalPending as number || 0) > 0) {
-      warnings.push({
-        type: 'missing-validation',
-        severity: 'high',
-        message: `${taskFactor.details?.criticalPending} critical task(s) pending resolution.`
-      });
-    }
-    
-    // Check aggregate confidence
-    const confidenceFactor = factors.find(f => f.name === 'Aggregate Insight Confidence');
-    if (confidenceFactor && (confidenceFactor.details?.lowConfidenceCount as number || 0) > 3) {
-      warnings.push({
-        type: 'low-authority',
-        severity: 'medium',
-        message: `${confidenceFactor.details?.lowConfidenceCount} insights have low confidence. Review recommended.`
-      });
-    }
-
-    return warnings;
-  }
-
-  private generateRecommendations(factors: TrustFactor[], warnings: TrustWarning[]): string[] {
-    const recommendations: string[] = [];
-    
-    // Evidence recommendations
-    const evidenceFactor = factors.find(f => f.name === 'Evidence Quantity');
-    if (evidenceFactor && evidenceFactor.score < 60) {
-      recommendations.push('Add supporting sources to increase evidence strength.');
-    }
-    
-    // Conflict recommendations
-    if (warnings.some(w => w.type === 'conflict')) {
-      recommendations.push('Schedule stakeholder meeting to resolve conflicting requirements.');
-    }
-    
-    // Stale data recommendations
-    if (warnings.some(w => w.type === 'stale-data')) {
-      recommendations.push('Re-validate this insight with current stakeholders.');
-    }
-    
-    // Linguistic recommendations
-    const linguisticFactor = factors.find(f => f.name === 'Linguistic Confidence');
-    if (linguisticFactor && linguisticFactor.score < 50) {
-      recommendations.push('Clarify ambiguous language with specific stakeholder input.');
-    }
-    
-    // Source reliability recommendations
-    const sourceFactor = factors.find(f => f.name === 'Source Reliability');
-    if (sourceFactor && sourceFactor.score < 60) {
-      recommendations.push('Verify this insight with a more authoritative source (e.g., official meeting/JIRA).');
-    }
-
-    return recommendations;
-  }
-
-  private generateProjectRecommendations(factors: TrustFactor[], warnings: TrustWarning[]): string[] {
-    const recommendations: string[] = [];
-    
-    // Coverage recommendations
-    const coverageFactor = factors.find(f => f.name === 'Insight Coverage');
-    if (coverageFactor && coverageFactor.score < 60) {
-      recommendations.push('Review and approve pending insights to improve coverage.');
-    }
-    
-    // Diversity recommendations
-    const diversityFactor = factors.find(f => f.name === 'Source Diversity');
-    if (diversityFactor && diversityFactor.score < 60) {
-      recommendations.push('Connect additional source types (meetings, JIRA, emails) for better validation.');
-    }
-    
-    // BRD recommendations
-    const brdFactor = factors.find(f => f.name === 'BRD Completeness');
-    if (brdFactor && brdFactor.score < 50) {
-      recommendations.push('Generate BRD sections from approved insights.');
-    }
-    
-    // Task recommendations
-    if (warnings.some(w => w.type === 'missing-validation')) {
-      recommendations.push('Prioritize resolving critical pending tasks.');
-    }
-    
-    // Stakeholder recommendations
-    const stakeholderFactor = factors.find(f => f.name === 'Stakeholder Engagement');
-    if (stakeholderFactor && stakeholderFactor.score < 50) {
-      recommendations.push('Identify and document more stakeholders and their decisions.');
-    }
-
-    return recommendations;
-  }
-
-  private calculateMetadata(factors: TrustFactor[], finalScore: number): TrustMetadata {
-    // Find dominant factor (highest weighted contribution)
-    const dominantFactor = factors.reduce((prev, curr) => 
-      (curr.score * curr.weight) > (prev.score * prev.weight) ? curr : prev
-    );
-    
-    // Calculate confidence interval based on factor variance
-    const scores = factors.map(f => f.score);
-    const variance = this.calculateVariance(scores);
-    const stdDev = Math.sqrt(variance);
-    
-    // Volatility: how much might the score change with new evidence
-    const volatility = Math.min(1, stdDev / 50);
-
-    return {
-      calculatedAt: new Date().toISOString(),
-      version: ENGINE_VERSION,
-      totalFactors: factors.length,
-      dominantFactor: dominantFactor.name,
-      confidenceInterval: {
-        low: Math.max(0, Math.round(finalScore - stdDev)),
-        high: Math.min(100, Math.round(finalScore + stdDev))
-      },
-      volatility: Math.round(volatility * 100) / 100
-    };
-  }
-
-  private calculateVariance(values: number[]): number {
-    if (values.length === 0) return 0;
-    const mean = values.reduce((sum, v) => sum + v, 0) / values.length;
-    return values.reduce((sum, v) => sum + Math.pow(v - mean, 2), 0) / values.length;
-  }
-
-  private updateHistoricalScore(insightId: string, score: number): void {
-    const history = this.historicalScores.get(insightId) || [];
-    history.push(score);
-    // Keep last 10 scores for trend analysis
-    if (history.length > 10) {
-      history.shift();
-    }
-    this.historicalScores.set(insightId, history);
-  }
-
-  // =========================================================================
-  // PUBLIC UTILITY METHODS
-  // =========================================================================
-
-  /**
-   * Get source reliability configuration
-   */
-  getSourceReliability(sourceType: Source['type']): SourceReliability {
-    return SOURCE_RELIABILITY_MAP[sourceType];
-  }
-
-  /**
-   * Customize source reliability for organization
-   */
-  setSourceReliability(sourceType: Source['type'], reliability: number): void {
-    this.customSourceReliability[sourceType] = Math.max(0, Math.min(100, reliability));
-  }
-
-  /**
-   * Get score trend for an insight
-   */
-  getScoreTrend(insightId: string): { trend: 'up' | 'down' | 'stable'; delta: number } {
-    const history = this.historicalScores.get(insightId) || [];
-    if (history.length < 2) {
-      return { trend: 'stable', delta: 0 };
-    }
-    
-    const recent = history[history.length - 1];
-    const previous = history[history.length - 2];
-    const delta = recent - previous;
-    
-    if (delta > 5) return { trend: 'up', delta };
-    if (delta < -5) return { trend: 'down', delta };
-    return { trend: 'stable', delta };
-  }
-
-  /**
-   * Batch calculate trust scores for multiple insights
-   */
-  calculateBatchTrustScores(
-    insights: Insight[],
-    sources: Source[] = []
-  ): Map<string, TrustScoreResult> {
-    const results = new Map<string, TrustScoreResult>();
-    
-    for (const insight of insights) {
-      const result = this.calculateInsightTrustScore(insight, insights, sources);
-      results.set(insight.id, result);
-    }
-    
-    return results;
-  }
-
-  /**
-   * Quick trust score calculation (minimal factors for performance)
-   */
-  calculateQuickTrustScore(insight: Insight): number {
-    const evidenceCount = insight.evidenceCount || 1;
-    const hasConflicts = insight.hasConflicts || false;
-    const stakeholderCount = insight.stakeholderMentions?.length || 0;
-    
-    let score = 50;
-    score += Math.min(30, evidenceCount * 10);
-    score += Math.min(15, stakeholderCount * 5);
-    if (hasConflicts) score -= 25;
-    
-    return Math.max(0, Math.min(100, score));
-  }
-}
-
-// ============================================================================
-// CONVENIENCE FUNCTIONS
-// ============================================================================
-
-// Singleton instance for common use
-let engineInstance: TrustScoreEngine | null = null;
-
-export const getTrustScoreEngine = (): TrustScoreEngine => {
-  if (!engineInstance) {
-    engineInstance = new TrustScoreEngine();
-  }
-  return engineInstance;
-};
-
-/**
- * Quick helper to calculate trust score for a single insight
- */
-export const calculateTrustScore = (
-  insight: Insight,
-  allInsights: Insight[] = [],
-  sources: Source[] = []
-): TrustScoreResult => {
-  return getTrustScoreEngine().calculateInsightTrustScore(insight, allInsights, sources);
-};
-
-/**
- * Quick helper to calculate project trust score
- */
-export const calculateProjectTrust = (project: ProjectState): TrustScoreResult => {
-  return getTrustScoreEngine().calculateProjectTrustScore(project);
-};
-
-/**
- * Convert trust score result to simple confidence level for backward compatibility
- */
-export const trustScoreToConfidence = (result: TrustScoreResult): 'high' | 'medium' | 'low' => {
-  if (result.finalScore >= 70) return 'high';
-  if (result.finalScore >= 40) return 'medium';
-  return 'low';
-};
-
-/**
- * Get color coding for trust score UI display
- */
-export const getTrustScoreColor = (score: number): { 
-  bg: string; 
-  text: string; 
   border: string;
   gradient: string;
-} => {
-  if (score >= 85) {
+  ring: string;
+}
+
+// ============================================================================
+// CONSTANTS
+// ============================================================================
+
+const DIMENSION_WEIGHTS = {
+  evidence: 0.25,      // Quality and quantity of evidence
+  validation: 0.20,    // Stakeholder validation status
+  consistency: 0.20,   // Cross-source agreement
+  completeness: 0.20,  // Coverage of requirements
+  freshness: 0.15,     // How recent the data is
+};
+
+// Helper to convert string confidence to numeric score
+const confidenceToNumber = (confidence: 'high' | 'medium' | 'low' | undefined): number => {
+  switch (confidence) {
+    case 'high': return 85;
+    case 'medium': return 60;
+    case 'low': return 35;
+    default: return 50;
+  }
+};
+
+// ============================================================================
+// SCORE UTILITIES
+// ============================================================================
+
+export const getGradeFromScore = (score: number): TrustGrade => {
+  if (score >= 90) return 'A';
+  if (score >= 75) return 'B';
+  if (score >= 60) return 'C';
+  if (score >= 40) return 'D';
+  return 'F';
+};
+
+export const getLevelFromScore = (score: number): TrustLevel => {
+  if (score >= 90) return 'excellent';
+  if (score >= 75) return 'good';
+  if (score >= 60) return 'fair';
+  if (score >= 40) return 'poor';
+  return 'critical';
+};
+
+export const getTrustColors = (score: number): TrustColors => {
+  if (score >= 90) {
     return {
       bg: 'bg-emerald-50',
       text: 'text-emerald-700',
       border: 'border-emerald-200',
-      gradient: 'from-emerald-500 to-emerald-600'
+      gradient: 'from-emerald-500 to-green-500',
+      ring: 'ring-emerald-500',
     };
   }
-  if (score >= 70) {
+  if (score >= 75) {
     return {
       bg: 'bg-green-50',
       text: 'text-green-700',
       border: 'border-green-200',
-      gradient: 'from-green-500 to-green-600'
+      gradient: 'from-green-500 to-lime-500',
+      ring: 'ring-green-500',
     };
   }
-  if (score >= 50) {
+  if (score >= 60) {
     return {
       bg: 'bg-yellow-50',
       text: 'text-yellow-700',
       border: 'border-yellow-200',
-      gradient: 'from-yellow-500 to-yellow-600'
+      gradient: 'from-yellow-500 to-amber-500',
+      ring: 'ring-yellow-500',
     };
   }
-  if (score >= 30) {
+  if (score >= 40) {
     return {
       bg: 'bg-orange-50',
       text: 'text-orange-700',
       border: 'border-orange-200',
-      gradient: 'from-orange-500 to-orange-600'
+      gradient: 'from-orange-500 to-red-400',
+      ring: 'ring-orange-500',
     };
   }
   return {
     bg: 'bg-red-50',
     text: 'text-red-700',
     border: 'border-red-200',
-    gradient: 'from-red-500 to-red-600'
+    gradient: 'from-red-500 to-rose-600',
+    ring: 'ring-red-500',
+  };
+};
+
+export const getTrustScoreColor = getTrustColors; // Alias for backwards compatibility
+
+// ============================================================================
+// DIMENSION CALCULATORS
+// ============================================================================
+
+/**
+ * Evidence Score: Quality and quantity of source evidence
+ */
+const calculateEvidenceScore = (project: ProjectState): TrustDimension => {
+  const sources = project.sources || [];
+  const insights = project.insights || [];
+  
+  let score = 0;
+  const tips: string[] = [];
+  
+  // Source count (0-30 points)
+  const sourcePoints = Math.min(sources.length * 6, 30);
+  score += sourcePoints;
+  if (sources.length < 3) {
+    tips.push('Add more data sources for stronger evidence');
+  }
+  
+  // Source type diversity (0-20 points)
+  const sourceTypes = new Set(sources.map(s => s.type));
+  const diversityPoints = Math.min(sourceTypes.size * 5, 20);
+  score += diversityPoints;
+  if (sourceTypes.size < 3) {
+    tips.push('Diversify source types (meetings, emails, documents)');
+  }
+  
+  // Insight extraction rate (0-30 points)
+  const insightsPerSource = sources.length > 0 ? insights.length / sources.length : 0;
+  const extractionPoints = Math.min(insightsPerSource * 10, 30);
+  score += extractionPoints;
+  if (insightsPerSource < 2) {
+    tips.push('Extract more insights from your sources');
+  }
+  
+  // Source references (0-20 points)
+  const insightsWithRefs = insights.filter(i => i.supportingSources && i.supportingSources.length > 0);
+  const refRatio = insights.length > 0 ? insightsWithRefs.length / insights.length : 0;
+  score += Math.round(refRatio * 20);
+  if (refRatio < 0.7) {
+    tips.push('Ensure insights have source references for traceability');
+  }
+  
+  return {
+    id: 'evidence',
+    name: 'Evidence Quality',
+    score: Math.round(score),
+    weight: DIMENSION_WEIGHTS.evidence,
+    icon: 'FileSearch',
+    description: 'Quality and quantity of source evidence supporting requirements',
+    tips,
   };
 };
 
 /**
- * Format trust score for display
+ * Validation Score: Stakeholder validation status
  */
-export const formatTrustScore = (result: TrustScoreResult): string => {
-  const levelLabels = {
-    'very-high': 'Very High',
-    'high': 'High',
-    'medium': 'Medium',
-    'low': 'Low',
-    'very-low': 'Very Low'
-  };
+const calculateValidationScore = (project: ProjectState): TrustDimension => {
+  const insights = project.insights || [];
   
-  return `${result.finalScore}% (${levelLabels[result.confidenceLevel]})`;
+  let score = 0;
+  const tips: string[] = [];
+  
+  if (insights.length === 0) {
+    return {
+      id: 'validation',
+      name: 'Validation Status',
+      score: 0,
+      weight: DIMENSION_WEIGHTS.validation,
+      icon: 'UserCheck',
+      description: 'Stakeholder approval and validation of requirements',
+      tips: ['Extract insights from sources to begin validation'],
+    };
+  }
+  
+  // Approved insights (0-50 points)
+  const approved = insights.filter(i => i.status === 'approved').length;
+  const approvedRatio = approved / insights.length;
+  score += Math.round(approvedRatio * 50);
+  
+  // Non-rejected insights (0-20 points)
+  const rejected = insights.filter(i => i.status === 'rejected').length;
+  const nonRejectedRatio = 1 - (rejected / insights.length);
+  score += Math.round(nonRejectedRatio * 20);
+  
+  // High priority insights validated (0-30 points)
+  const highPriority = insights.filter(i => i.priority === 'must' || i.priority === 'should');
+  const validatedHighPriority = highPriority.filter(i => i.status === 'approved').length;
+  const highPriorityRatio = highPriority.length > 0 ? validatedHighPriority / highPriority.length : 1;
+  score += Math.round(highPriorityRatio * 30);
+  
+  // Generate tips
+  const pendingCount = insights.filter(i => i.status === 'pending').length;
+  if (pendingCount > 0) {
+    tips.push(`${pendingCount} insight(s) pending validation`);
+  }
+  if (rejected > 0) {
+    tips.push(`${rejected} insight(s) rejected - review and revise`);
+  }
+  if (approvedRatio < 0.5) {
+    tips.push('Get stakeholder approval on more insights');
+  }
+  
+  return {
+    id: 'validation',
+    name: 'Validation Status',
+    score: Math.round(score),
+    weight: DIMENSION_WEIGHTS.validation,
+    icon: 'UserCheck',
+    description: 'Stakeholder approval and validation of requirements',
+    tips,
+  };
+};
+
+/**
+ * Consistency Score: Cross-source agreement
+ */
+const calculateConsistencyScore = (project: ProjectState): TrustDimension => {
+  const insights = project.insights || [];
+  
+  let score = 100; // Start at 100 and deduct
+  const tips: string[] = [];
+  
+  // Insights with conflicts penalty (-20 per conflicting insight, max -60)
+  const conflictingInsights = insights.filter(i => i.hasConflicts).length;
+  score -= Math.min(conflictingInsights * 20, 60);
+  if (conflictingInsights > 0) {
+    tips.push(`Resolve ${conflictingInsights} requirement conflict(s)`);
+  }
+  
+  // Low confidence insights penalty
+  const lowConfidence = insights.filter(i => i.confidence === 'low').length;
+  const lowConfRatio = insights.length > 0 ? lowConfidence / insights.length : 0;
+  score -= Math.round(lowConfRatio * 20);
+  if (lowConfidence > 0) {
+    tips.push(`${lowConfidence} insight(s) have low confidence - verify sources`);
+  }
+  
+  // Bonus for multiple source references (max +20)
+  const multiSourceInsights = insights.filter(i => i.supportingSources && i.supportingSources.length > 1);
+  const multiSourceRatio = insights.length > 0 ? multiSourceInsights.length / insights.length : 0;
+  score += Math.round(multiSourceRatio * 20);
+  if (multiSourceRatio < 0.3 && insights.length > 0) {
+    tips.push('Cross-reference insights with multiple sources');
+  }
+  
+  return {
+    id: 'consistency',
+    name: 'Consistency',
+    score: Math.max(0, Math.min(100, score)),
+    weight: DIMENSION_WEIGHTS.consistency,
+    icon: 'GitCompare',
+    description: 'Agreement and consistency across different sources',
+    tips,
+  };
+};
+
+/**
+ * Completeness Score: Coverage of requirements
+ */
+const calculateCompletenessScore = (project: ProjectState): TrustDimension => {
+  const insights = project.insights || [];
+  const sections = project.brd?.sections || [];
+  const tasks = project.tasks || [];
+  
+  let score = 0;
+  const tips: string[] = [];
+  
+  // Insight category coverage (0-30 points)
+  const categories = new Set(insights.map(i => i.category));
+  const expectedCategories = ['functional', 'non-functional', 'stakeholder', 'decision', 'constraint'];
+  const categoryScore = Math.round((categories.size / expectedCategories.length) * 30);
+  score += categoryScore;
+  
+  const missingCategories = expectedCategories.filter(c => !categories.has(c as any));
+  if (missingCategories.length > 0) {
+    tips.push(`Missing categories: ${missingCategories.slice(0, 2).join(', ')}`);
+  }
+  
+  // BRD section coverage (0-40 points)
+  const filledSections = sections.filter(s => s.content && s.content.length > 100);
+  const sectionRatio = sections.length > 0 ? filledSections.length / sections.length : 0;
+  score += Math.round(sectionRatio * 40);
+  if (sectionRatio < 0.7 && sections.length > 0) {
+    tips.push('Complete more BRD sections with detailed content');
+  }
+  
+  // Task resolution (0-30 points)
+  const pendingTasks = tasks.length;
+  const taskScore = Math.max(30 - (pendingTasks * 5), 0);
+  score += taskScore;
+  if (pendingTasks > 0) {
+    tips.push(`${pendingTasks} clarification task(s) pending`);
+  }
+  
+  return {
+    id: 'completeness',
+    name: 'Completeness',
+    score: Math.min(100, score),
+    weight: DIMENSION_WEIGHTS.completeness,
+    icon: 'CheckSquare',
+    description: 'Coverage of all requirement categories and BRD sections',
+    tips,
+  };
+};
+
+/**
+ * Freshness Score: How recent the data is
+ */
+const calculateFreshnessScore = (project: ProjectState): TrustDimension => {
+  const now = new Date();
+  const insights = project.insights || [];
+  
+  let score = 100;
+  const tips: string[] = [];
+  
+  // Project last update (0-40 points)
+  if (project.lastUpdated) {
+    const lastUpdate = new Date(project.lastUpdated);
+    const daysSinceUpdate = Math.floor((now.getTime() - lastUpdate.getTime()) / (1000 * 60 * 60 * 24));
+    
+    if (daysSinceUpdate <= 1) score = 100;
+    else if (daysSinceUpdate <= 7) score = 90;
+    else if (daysSinceUpdate <= 14) score = 75;
+    else if (daysSinceUpdate <= 30) score = 60;
+    else score = Math.max(30, 60 - (daysSinceUpdate - 30));
+    
+    if (daysSinceUpdate > 7) {
+      tips.push(`Last updated ${daysSinceUpdate} days ago - consider refreshing data`);
+    }
+  }
+  
+  // Check for old insights without recent validation
+  const oldInsights = insights.filter(i => {
+    if (!i.timestamp) return false;
+    const created = new Date(i.timestamp);
+    const daysSince = Math.floor((now.getTime() - created.getTime()) / (1000 * 60 * 60 * 24));
+    return daysSince > 30 && i.status === 'pending';
+  });
+  
+  if (oldInsights.length > 0) {
+    score -= 10;
+    tips.push(`${oldInsights.length} old insight(s) need validation`);
+  }
+  
+  return {
+    id: 'freshness',
+    name: 'Data Freshness',
+    score: Math.max(0, Math.min(100, score)),
+    weight: DIMENSION_WEIGHTS.freshness,
+    icon: 'Clock',
+    description: 'How recent and up-to-date the information is',
+    tips,
+  };
 };
 
 // ============================================================================
-// REAL-TIME TRUST SCORE SYSTEM
+// MAIN CALCULATION
 // ============================================================================
 
-// Event types for trust score updates
+/**
+ * Calculate the complete trust score for a project
+ */
+export const calculateTrustScore = (project: ProjectState): TrustScore => {
+  const dimensions: TrustDimension[] = [
+    calculateEvidenceScore(project),
+    calculateValidationScore(project),
+    calculateConsistencyScore(project),
+    calculateCompletenessScore(project),
+    calculateFreshnessScore(project),
+  ];
+  
+  // Calculate weighted overall score
+  const overall = Math.round(
+    dimensions.reduce((sum, dim) => sum + (dim.score * dim.weight), 0)
+  );
+  
+  // Generate alerts based on dimensions
+  const alerts: TrustAlert[] = [];
+  
+  dimensions.forEach(dim => {
+    if (dim.score < 40) {
+      alerts.push({
+        id: `${dim.id}-critical`,
+        level: 'critical',
+        message: `${dim.name} is critically low (${dim.score}%)`,
+        action: dim.tips[0],
+      });
+    } else if (dim.score < 60) {
+      alerts.push({
+        id: `${dim.id}-warning`,
+        level: 'warning',
+        message: `${dim.name} needs attention (${dim.score}%)`,
+        action: dim.tips[0],
+      });
+    }
+  });
+  
+  // Generate summary
+  const grade = getGradeFromScore(overall);
+  const level = getLevelFromScore(overall);
+  const lowestDim = dimensions.reduce((a, b) => (a.score < b.score ? a : b));
+  
+  const summaryMap: Record<TrustLevel, string> = {
+    excellent: 'Requirements are well-documented with strong evidence and validation.',
+    good: 'Good progress. A few areas could use more validation.',
+    fair: `Overall acceptable, but ${lowestDim.name.toLowerCase()} needs improvement.`,
+    poor: `Significant gaps identified. Focus on improving ${lowestDim.name.toLowerCase()}.`,
+    critical: 'Critical attention needed. Multiple trust factors require immediate action.',
+  };
+  
+  return {
+    overall,
+    grade,
+    level,
+    dimensions,
+    alerts,
+    summary: summaryMap[level],
+    calculatedAt: new Date().toISOString(),
+  };
+};
+
+/**
+ * Calculate trust score for a single insight
+ */
+export const calculateInsightTrust = (
+  insight: Insight,
+  sources: Source[]
+): { score: number; grade: TrustGrade; issues: string[] } => {
+  let score = 50; // Base score
+  const issues: string[] = [];
+  
+  // Source references (+20 max)
+  const refs = insight.supportingSources?.length || 0;
+  score += Math.min(refs * 10, 20);
+  if (refs === 0) issues.push('No source references');
+  
+  // Approval status (+30 max)
+  if (insight.status === 'approved') score += 30;
+  else if (insight.status === 'rejected') {
+    score -= 30;
+    issues.push('Rejected by stakeholder');
+  }
+  
+  // Insight confidence (+20 max)
+  const confidenceNum = insight.confidenceScore ?? confidenceToNumber(insight.confidence);
+  score += Math.round((confidenceNum / 100) * 20);
+  if (confidenceNum < 60) issues.push('Low confidence score');
+  
+  // Priority bonus (+10 max)
+  if (insight.priority === 'must') score += 10;
+  else if (insight.priority === 'should') score += 5;
+  
+  // Multiple sources bonus (+10)
+  if (refs > 1) score += 10;
+  
+  return {
+    score: Math.max(0, Math.min(100, score)),
+    grade: getGradeFromScore(Math.max(0, Math.min(100, score))),
+    issues,
+  };
+};
+
+// ============================================================================
+// EVENT SYSTEM
+// ============================================================================
+
 export type TrustScoreEventType = 
   | 'insight-added'
   | 'insight-updated'
   | 'insight-removed'
   | 'source-added'
   | 'source-removed'
-  | 'conflict-detected'
+  | 'validation-changed'
   | 'conflict-resolved'
-  | 'project-updated';
+  | 'recalculated';
 
 export interface TrustScoreEvent {
   type: TrustScoreEventType;
   timestamp: string;
   insightId?: string;
   sourceId?: string;
-  previousScore?: number;
-  newScore?: number;
 }
 
-// Listeners for trust score changes
-type TrustScoreListener = (event: TrustScoreEvent, projectScore: TrustScoreResult, insightScores: Map<string, TrustScoreResult>) => void;
+type TrustScoreListener = (score: TrustScore, event: TrustScoreEvent) => void;
 
-// Real-time trust score manager
-class TrustScoreManager {
-  private listeners: Set<TrustScoreListener> = new Set();
-  private lastProjectScore: TrustScoreResult | null = null;
-  private lastInsightScores: Map<string, TrustScoreResult> = new Map();
-  private debounceTimer: ReturnType<typeof setTimeout> | null = null;
-  private pendingEvents: TrustScoreEvent[] = [];
+let listeners: TrustScoreListener[] = [];
+let cachedScore: TrustScore | null = null;
 
-  /**
-   * Subscribe to trust score updates
-   */
-  subscribe(listener: TrustScoreListener): () => void {
-    this.listeners.add(listener);
-    return () => this.listeners.delete(listener);
-  }
-
-  /**
-   * Recalculate all trust scores for a project and notify listeners
-   */
-  recalculateAll(project: ProjectState): {
-    projectScore: TrustScoreResult;
-    insightScores: Map<string, TrustScoreResult>;
-    updatedInsights: Insight[];
-  } {
-    const engine = getTrustScoreEngine();
-    const insights = project.insights || [];
-    const sources = project.sources || [];
-
-    // Calculate project-level trust score
-    const projectScore = engine.calculateProjectTrustScore(project);
-    
-    // Calculate individual insight trust scores
-    const insightScores = engine.calculateBatchTrustScores(insights, sources);
-    
-    // Update insights with their trust scores
-    const updatedInsights = insights.map(insight => {
-      const trustResult = insightScores.get(insight.id);
-      if (!trustResult) return insight;
-      
-      return {
-        ...insight,
-        confidenceScore: trustResult.finalScore,
-        confidence: trustScoreToConfidence(trustResult),
-        trustScore: {
-          finalScore: trustResult.finalScore,
-          confidenceLevel: trustResult.confidenceLevel,
-          factorBreakdown: {
-            evidenceQuantity: trustResult.factors.find(f => f.name === 'Evidence Quantity')?.score || 0,
-            sourceReliability: trustResult.factors.find(f => f.name === 'Source Reliability')?.score || 0,
-            linguisticConfidence: trustResult.factors.find(f => f.name === 'Linguistic Confidence')?.score || 0,
-            temporalFreshness: trustResult.factors.find(f => f.name === 'Temporal Freshness')?.score || 0,
-            stakeholderConsensus: trustResult.factors.find(f => f.name === 'Stakeholder Consensus')?.score || 0,
-            crossValidation: trustResult.factors.find(f => f.name === 'Cross-Validation')?.score || 0,
-            conflictImpact: trustResult.factors.find(f => f.name === 'Conflict Impact')?.score || 0,
-          },
-          warnings: trustResult.warnings.map(w => w.message),
-          recommendations: trustResult.recommendations,
-          lastCalculated: new Date().toISOString(),
-          volatility: trustResult.metadata.volatility
-        }
-      };
-    });
-
-    // Store for comparison
-    this.lastProjectScore = projectScore;
-    this.lastInsightScores = insightScores;
-
-    return { projectScore, insightScores, updatedInsights };
-  }
-
-  /**
-   * Emit a trust score change event (debounced)
-   */
-  emitChange(event: TrustScoreEvent, project: ProjectState): void {
-    this.pendingEvents.push(event);
-    
-    // Debounce to batch rapid changes
-    if (this.debounceTimer) {
-      clearTimeout(this.debounceTimer);
-    }
-    
-    this.debounceTimer = setTimeout(() => {
-      const { projectScore, insightScores } = this.recalculateAll(project);
-      
-      // Notify all listeners
-      for (const listener of this.listeners) {
-        for (const evt of this.pendingEvents) {
-          try {
-            listener(evt, projectScore, insightScores);
-          } catch (e) {
-            console.error('Trust score listener error:', e);
-          }
-        }
-      }
-      
-      this.pendingEvents = [];
-    }, 100); // 100ms debounce
-  }
-
-  /**
-   * Get the last calculated project score
-   */
-  getLastProjectScore(): TrustScoreResult | null {
-    return this.lastProjectScore;
-  }
-
-  /**
-   * Get the last calculated insight scores
-   */
-  getLastInsightScores(): Map<string, TrustScoreResult> {
-    return this.lastInsightScores;
-  }
-
-  /**
-   * Get score for a specific insight
-   */
-  getInsightScore(insightId: string): TrustScoreResult | undefined {
-    return this.lastInsightScores.get(insightId);
-  }
-}
-
-// Singleton instance
-let trustScoreManager: TrustScoreManager | null = null;
-
-export const getTrustScoreManager = (): TrustScoreManager => {
-  if (!trustScoreManager) {
-    trustScoreManager = new TrustScoreManager();
-  }
-  return trustScoreManager;
+export const subscribeTrustScore = (listener: TrustScoreListener): (() => void) => {
+  listeners.push(listener);
+  return () => {
+    listeners = listeners.filter(l => l !== listener);
+  };
 };
 
-/**
- * Recalculate and update all trust scores for a project
- * Returns the updated project with recalculated scores
- */
+export const emitTrustScoreChange = (event: TrustScoreEvent, project: ProjectState): void => {
+  cachedScore = calculateTrustScore(project);
+  listeners.forEach(listener => listener(cachedScore!, event));
+};
+
 export const recalculateTrustScores = (project: ProjectState): ProjectState => {
-  const manager = getTrustScoreManager();
-  const { projectScore, updatedInsights } = manager.recalculateAll(project);
+  cachedScore = calculateTrustScore(project);
+  
+  // Update insight confidence scores (using confidenceScore, not confidence which is string)
+  const updatedInsights = project.insights.map(insight => ({
+    ...insight,
+    confidenceScore: calculateInsightTrust(insight, project.sources).score,
+  }));
   
   return {
     ...project,
     insights: updatedInsights,
-    overallConfidence: projectScore.finalScore,
-    lastUpdated: new Date().toISOString()
+    lastUpdated: new Date().toISOString(),
   };
 };
 
-/**
- * Subscribe to trust score changes
- */
-export const subscribeTrustScoreChanges = (
-  listener: TrustScoreListener
-): (() => void) => {
-  return getTrustScoreManager().subscribe(listener);
-};
+export const getCachedTrustScore = (): TrustScore | null => cachedScore;
+
+// ============================================================================
+// LEGACY COMPATIBILITY EXPORTS
+// ============================================================================
+
+// These are kept for backwards compatibility with existing code
+export type TrustScoreResult = TrustScore;
+export type TrustFactor = TrustDimension;
+export type TrustWarning = TrustAlert;
 
 /**
- * Emit a trust score change event
+ * Quick trust score calculation for a single insight without requiring sources
+ * Returns a number between 0-100
  */
-export const emitTrustScoreChange = (
-  event: TrustScoreEvent,
-  project: ProjectState
-): void => {
-  getTrustScoreManager().emitChange(event, project);
+const calculateQuickTrustScore = (insight: Insight): number => {
+  let score = 50; // Base score
+  
+  // Source references (+20 max)
+  const refs = insight.supportingSources?.length || 0;
+  score += Math.min(refs * 10, 20);
+  
+  // Approval status (+30 max)
+  if (insight.status === 'approved') score += 30;
+  else if (insight.status === 'rejected') score -= 30;
+  
+  // Insight confidence (+20 max)
+  const confidenceNum = insight.confidenceScore ?? confidenceToNumber(insight.confidence);
+  score += Math.round((confidenceNum / 100) * 20);
+  
+  // Priority bonus (+10 max)
+  if (insight.priority === 'must') score += 10;
+  else if (insight.priority === 'should') score += 5;
+  
+  // Multiple sources bonus (+10)
+  if (refs > 1) score += 10;
+  
+  return Math.max(0, Math.min(100, score));
 };
 
-/**
- * Get current trust score for an insight
- */
-export const getInsightTrustScore = (insightId: string): TrustScoreResult | undefined => {
-  return getTrustScoreManager().getInsightScore(insightId);
-};
+export const calculateProjectTrust = calculateTrustScore;
+export const getTrustScoreEngine = () => ({
+  calculateInsightTrustScore: calculateInsightTrust,
+  calculateProjectTrustScore: calculateTrustScore,
+  calculateQuickTrustScore: calculateQuickTrustScore,
+});
+export const getTrustScoreManager = () => ({
+  recalculateAll: (project: ProjectState) => ({
+    projectScore: calculateTrustScore(project),
+    insightScores: new Map(
+      project.insights.map(i => [i.id, calculateInsightTrust(i, project.sources)])
+    ),
+  }),
+});
 
 /**
- * Get current project trust score
+ * Format trust score for display
  */
-export const getCurrentProjectTrustScore = (): TrustScoreResult | null => {
-  return getTrustScoreManager().getLastProjectScore();
+export const formatTrustScore = (score: number): string => {
+  return `${Math.round(score)}%`;
 };

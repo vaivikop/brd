@@ -12,6 +12,7 @@ import ConflictDetection from './ConflictDetection';
 import TraceabilityMatrix from './TraceabilityMatrix';
 import SentimentDashboard from './SentimentDashboard';
 import StatusReportView from './StatusReportView';
+import AgentPanel from './AgentPanel';
 import { getProjectData, ProjectState } from '../utils/db';
 import { Loader, RefreshCw, AlertCircle, Menu } from 'lucide-react';
 import ErrorBoundary from './ErrorBoundary';
@@ -39,6 +40,17 @@ const DashboardLayout: React.FC = () => {
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [lastRefresh, setLastRefresh] = useState<Date>(new Date());
   const [loadError, setLoadError] = useState<string | null>(null);
+  const [agentPanelExpanded, setAgentPanelExpanded] = useState(() => {
+    const saved = localStorage.getItem('clarityai_agent_panel_expanded');
+    return saved === 'true';
+  });
+
+  // Toggle agent panel with persistence
+  const handleToggleAgentPanel = () => {
+    const newState = !agentPanelExpanded;
+    setAgentPanelExpanded(newState);
+    localStorage.setItem('clarityai_agent_panel_expanded', String(newState));
+  };
 
   // Persist sidebar collapsed state
   const handleToggleSidebar = () => {
@@ -280,6 +292,17 @@ const DashboardLayout: React.FC = () => {
         </div>
         </div>
       </main>
+
+      {/* AI Agent Panel - Floating */}
+      {project && (
+        <AgentPanel 
+          project={project} 
+          onProjectUpdate={setProject}
+          isExpanded={agentPanelExpanded}
+          onToggleExpand={handleToggleAgentPanel}
+          onNavigateToStatusReport={() => setActiveTab('status-report')}
+        />
+      )}
     </div>
   );
 };

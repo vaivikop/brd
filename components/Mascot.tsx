@@ -8,9 +8,9 @@ interface MascotProps {
 
 const Mascot: React.FC<MascotProps> = ({ expression = 'neutral', className = '', size = 'md' }) => {
   const sizeClasses = {
-    sm: "w-10 h-10",
-    md: "w-24 h-24",
-    lg: "w-36 h-36"
+    sm: "w-16 h-16",
+    md: "w-40 h-40",
+    lg: "w-56 h-56"
   };
 
   return (

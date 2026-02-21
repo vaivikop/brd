@@ -5,12 +5,11 @@
 
 import { Insight, SourceReference, MoSCoWPriority, Source } from './db';
 import { 
-  TrustScoreEngine, 
   TrustScoreResult, 
   getTrustScoreEngine,
-  calculateTrustScore,
-  trustScoreToConfidence,
-  getTrustScoreColor
+  calculateInsightTrust,
+  getTrustScoreColor,
+  TrustScore
 } from './TrustScoreEngine';
 
 // ============================================================================
@@ -143,7 +142,17 @@ export const calculateComprehensiveTrustScore = (
   allInsights: Insight[] = [],
   sources: Source[] = []
 ): TrustScoreResult => {
-  return calculateTrustScore(insight, allInsights, sources);
+  const result = calculateInsightTrust(insight, sources);
+  // Convert to TrustScoreResult format
+  return {
+    overall: result.score,
+    grade: result.grade,
+    level: result.score >= 90 ? 'excellent' : result.score >= 75 ? 'good' : result.score >= 60 ? 'fair' : result.score >= 40 ? 'poor' : 'critical',
+    dimensions: [],
+    alerts: result.issues.map((issue, i) => ({ id: `issue-${i}`, level: 'warning' as const, message: issue })),
+    summary: `Trust score: ${result.score}%`,
+    calculatedAt: new Date().toISOString()
+  };
 };
 
 /**
@@ -153,7 +162,11 @@ export const calculateAllTrustScores = (
   insights: Insight[],
   sources: Source[] = []
 ): Map<string, TrustScoreResult> => {
-  return getTrustScoreEngine().calculateBatchTrustScores(insights, sources);
+  const results = new Map<string, TrustScoreResult>();
+  for (const insight of insights) {
+    results.set(insight.id, calculateComprehensiveTrustScore(insight, insights, sources));
+  }
+  return results;
 };
 
 /**

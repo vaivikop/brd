@@ -554,12 +554,15 @@ const InsightsReview: React.FC<InsightsReviewProps> = ({ project, onUpdate, onCo
                       </div>
 
                       {/* Expanded Details */}
-                      <AnimatePresence>
+                      <AnimatePresence mode="wait">
                         {isExpanded && (
                           <motion.div 
+                            key={`expanded-${insight.id}`}
+                            layout={false}
                             initial={{ height: 0, opacity: 0 }}
                             animate={{ height: 'auto', opacity: 1 }}
                             exit={{ height: 0, opacity: 0 }}
+                            transition={{ duration: 0.2 }}
                             className="overflow-hidden"
                           >
                             <div className="mt-4 pt-4 border-t border-slate-100">

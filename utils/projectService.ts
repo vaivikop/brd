@@ -28,8 +28,11 @@ import {
   emitTrustScoreChange,
   TrustScoreEvent,
   TrustScoreEventType,
-  getTrustScoreManager,
-  TrustScoreResult
+  TrustScore,
+  calculateTrustScore,
+  calculateInsightTrust,
+  subscribeTrustScore,
+  getTrustColors,
 } from './TrustScoreEngine';
 
 // ============================================================================
@@ -125,7 +128,7 @@ export const updateProjectContext = async (
   updates: Partial<ProjectState>
 ): Promise<ProjectState> => {
   const result = await dbUpdateProjectContext(updates);
-  return applyTrustScoreRecalculation(result, 'project-updated');
+  return applyTrustScoreRecalculation(result, 'recalculated');
 };
 
 /**
@@ -165,14 +168,19 @@ export const reorderInsightPriorities = async (
  * Get current trust scores for project
  */
 export const getProjectTrustScores = async (): Promise<{
-  projectScore: TrustScoreResult | null;
-  insightScores: Map<string, TrustScoreResult>;
+  projectScore: TrustScore | null;
+  insightScores: Map<string, number>;
 } | null> => {
   const project = await getProjectData();
   if (!project) return null;
   
-  const manager = getTrustScoreManager();
-  const { projectScore, insightScores } = manager.recalculateAll(project);
+  const projectScore = calculateTrustScore(project);
+  const insightScores = new Map<string, number>();
+  
+  for (const insight of project.insights || []) {
+    const result = calculateInsightTrust(insight, project.sources || []);
+    insightScores.set(insight.id, result.score);
+  }
   
   return { projectScore, insightScores };
 };
@@ -192,17 +200,15 @@ export const recalculateAndGetProject = async (): Promise<ProjectState | null> =
  */
 export const getInsightTrustScore = async (
   insightId: string
-): Promise<TrustScoreResult | null> => {
+): Promise<number | null> => {
   const project = await getProjectData();
   if (!project) return null;
   
   const insight = project.insights.find(i => i.id === insightId);
   if (!insight) return null;
   
-  const manager = getTrustScoreManager();
-  const { insightScores } = manager.recalculateAll(project);
-  
-  return insightScores.get(insightId) || null;
+  const result = calculateInsightTrust(insight, project.sources || []);
+  return result.score;
 };
 
 // Re-export types and functions that don't need wrapping
@@ -217,15 +223,14 @@ export type {
 } from './db';
 
 export type {
-  TrustScoreResult,
+  TrustScore,
   TrustScoreEvent,
   TrustScoreEventType,
-  TrustFactor,
-  TrustWarning
+  TrustDimension,
+  TrustAlert,
 } from './TrustScoreEngine';
 
 export {
-  getTrustScoreColor,
-  formatTrustScore,
-  subscribeTrustScoreChanges
+  getTrustColors,
+  subscribeTrustScore as subscribeTrustScoreChanges
 } from './TrustScoreEngine';

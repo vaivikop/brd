@@ -30,24 +30,23 @@ const Navbar: React.FC = () => {
                 </button>
                 {/* Mega Menu Dropdown */}
                 <div className="absolute top-full left-0 w-64 bg-white border border-slate-100 shadow-xl rounded-xl p-4 opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all duration-200 transform translate-y-2 group-hover:translate-y-0">
-                    <a href="#how-it-works" className="block px-4 py-3 hover:bg-slate-50 rounded-lg">
+                    <a href="#transformation" className="block px-4 py-3 hover:bg-slate-50 rounded-lg">
                         <div className="text-slate-900 font-semibold text-sm">How it Works</div>
-                        <div className="text-slate-500 text-xs mt-1">From recording to BRD</div>
+                        <div className="text-slate-500 text-xs mt-1">From chaos to clarity in 4 steps</div>
                     </a>
                     <a href="#confidence" className="block px-4 py-3 hover:bg-slate-50 rounded-lg">
                         <div className="text-slate-900 font-semibold text-sm">Confidence Engine</div>
                         <div className="text-slate-500 text-xs mt-1">Trust your requirements</div>
                     </a>
                     <a href="#features" className="block px-4 py-3 hover:bg-slate-50 rounded-lg">
-                        <div className="text-slate-900 font-semibold text-sm">Integrations</div>
-                        <div className="text-slate-500 text-xs mt-1">Connect your stack</div>
+                        <div className="text-slate-900 font-semibold text-sm">Features</div>
+                        <div className="text-slate-500 text-xs mt-1">Built for trust & transparency</div>
                     </a>
                 </div>
             </div>
-            <a href="#features" className="px-4 py-2 text-slate-600 hover:text-blue-600 font-medium text-sm transition-colors">Solutions</a>
-            <a href="#resources" className="px-4 py-2 text-slate-600 hover:text-blue-600 font-medium text-sm transition-colors">Resources</a>
-            <a href="#pricing" className="px-4 py-2 text-slate-600 hover:text-blue-600 font-medium text-sm transition-colors">Pricing</a>
-            <a href="#enterprise" className="px-4 py-2 text-slate-600 hover:text-blue-600 font-medium text-sm transition-colors">Enterprise</a>
+            <a href="#problem" className="px-4 py-2 text-slate-600 hover:text-blue-600 font-medium text-sm transition-colors">The Problem</a>
+            <a href="#social-proof" className="px-4 py-2 text-slate-600 hover:text-blue-600 font-medium text-sm transition-colors">Testimonials</a>
+            <a href="#faq" className="px-4 py-2 text-slate-600 hover:text-blue-600 font-medium text-sm transition-colors">FAQ</a>
           </div>
 
           {/* Action Buttons */}
@@ -74,10 +73,10 @@ const Navbar: React.FC = () => {
       {/* Mobile menu */}
       {isOpen && (
         <div className="lg:hidden absolute top-20 left-0 w-full bg-white border-b border-slate-200 shadow-lg p-6 flex flex-col space-y-4">
-          <a href="#how-it-works" className="text-slate-600 hover:text-blue-600 font-medium py-2 border-b border-slate-50">Product</a>
-          <a href="#features" className="text-slate-600 hover:text-blue-600 font-medium py-2 border-b border-slate-50">Solutions</a>
-          <a href="#pricing" className="text-slate-600 hover:text-blue-600 font-medium py-2 border-b border-slate-50">Pricing</a>
-          <a href="#enterprise" className="text-slate-600 hover:text-blue-600 font-medium py-2 mb-4">Enterprise</a>
+          <a href="#transformation" className="text-slate-600 hover:text-blue-600 font-medium py-2 border-b border-slate-50">How it Works</a>
+          <a href="#problem" className="text-slate-600 hover:text-blue-600 font-medium py-2 border-b border-slate-50">The Problem</a>
+          <a href="#social-proof" className="text-slate-600 hover:text-blue-600 font-medium py-2 border-b border-slate-50">Testimonials</a>
+          <a href="#faq" className="text-slate-600 hover:text-blue-600 font-medium py-2 mb-4">FAQ</a>
           <div className="pt-2 flex flex-col gap-3">
              <Button variant="outline" className="w-full justify-center">Log In</Button>
              <Button className="w-full justify-center" onClick={() => navigateTo('onboarding')}>Get Started Free</Button>
