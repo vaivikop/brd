@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { 
   FileText, 
   Download, 
@@ -19,14 +19,49 @@ import {
   Zap,
   Shield,
   AlertCircle,
-  ChevronRight
+  ChevronRight,
+  History,
+  Timer,
+  CheckSquare,
+  Square,
+  Trash2,
+  Save,
+  GitCompare,
+  X
 } from 'lucide-react';
 import { motion } from 'motion/react';
 import Button from './Button';
 import Tooltip from './Tooltip';
-import { ProjectState } from '../utils/db';
+import { ProjectState, updateProjectContext } from '../utils/db';
 import { generateStatusReport, StatusReport, RequirementConflict } from '../utils/services/ai';
 import Markdown from 'react-markdown';
+
+// Persistent action items storage
+interface PersistentActionItem {
+  id: string;
+  item: string;
+  owner: string;
+  dueDate: string;
+  priority: 'high' | 'medium' | 'low';
+  completed: boolean;
+  completedAt?: string;
+  createdAt: string;
+}
+
+// Report history entry
+interface ReportHistoryEntry {
+  id: string;
+  generatedAt: string;
+  title: string;
+  executiveSummary: string;
+  averageProgress: number;
+  totalRisks: number;
+  totalActionItems: number;
+}
+
+const ACTION_ITEMS_KEY = 'clarity_action_items';
+const REPORT_HISTORY_KEY = 'clarity_report_history';
+const SCHEDULED_GENERATION_KEY = 'clarity_scheduled_gen';
 
 interface StatusReportViewProps {
   project: ProjectState;
@@ -63,6 +98,145 @@ const StatusReportView: React.FC<StatusReportViewProps> = ({
   const [isGenerating, setIsGenerating] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
+  const [generationProgress, setGenerationProgress] = useState(0);
+  
+  // New state for enhanced features
+  const [persistentActionItems, setPersistentActionItems] = useState<PersistentActionItem[]>([]);
+  const [reportHistory, setReportHistory] = useState<ReportHistoryEntry[]>([]);
+  const [showHistoryModal, setShowHistoryModal] = useState(false);
+  const [comparisonReport, setComparisonReport] = useState<ReportHistoryEntry | null>(null);
+  const [scheduledGeneration, setScheduledGeneration] = useState<{ enabled: boolean; interval: 'daily' | 'weekly' | 'monthly' } | null>(null);
+  const [showScheduleModal, setShowScheduleModal] = useState(false);
+
+  // Load persistent action items from localStorage
+  useEffect(() => {
+    try {
+      const stored = localStorage.getItem(`${ACTION_ITEMS_KEY}_${project.id}`);
+      if (stored) {
+        setPersistentActionItems(JSON.parse(stored));
+      }
+    } catch (e) {
+      console.error('Failed to load action items:', e);
+    }
+  }, [project.id]);
+
+  // Load report history
+  useEffect(() => {
+    try {
+      const stored = localStorage.getItem(`${REPORT_HISTORY_KEY}_${project.id}`);
+      if (stored) {
+        setReportHistory(JSON.parse(stored));
+      }
+    } catch (e) {
+      console.error('Failed to load report history:', e);
+    }
+  }, [project.id]);
+
+  // Load scheduled generation settings
+  useEffect(() => {
+    try {
+      const stored = localStorage.getItem(`${SCHEDULED_GENERATION_KEY}_${project.id}`);
+      if (stored) {
+        setScheduledGeneration(JSON.parse(stored));
+      }
+    } catch (e) {
+      console.error('Failed to load scheduled settings:', e);
+    }
+  }, [project.id]);
+
+  // Save action items to localStorage
+  const saveActionItems = useCallback((items: PersistentActionItem[]) => {
+    try {
+      localStorage.setItem(`${ACTION_ITEMS_KEY}_${project.id}`, JSON.stringify(items));
+      setPersistentActionItems(items);
+    } catch (e) {
+      console.error('Failed to save action items:', e);
+    }
+  }, [project.id]);
+
+  // Save report to history
+  const saveToHistory = useCallback((reportData: StatusReport) => {
+    const avgProgress = reportData.progressMetrics.length > 0 
+      ? Math.round(reportData.progressMetrics.reduce((a, m) => a + m.current, 0) / reportData.progressMetrics.length)
+      : 0;
+      
+    const historyEntry: ReportHistoryEntry = {
+      id: `report_${Date.now()}`,
+      generatedAt: reportData.generatedAt,
+      title: reportData.title,
+      executiveSummary: reportData.executiveSummary,
+      averageProgress: avgProgress,
+      totalRisks: reportData.activeRisks.length,
+      totalActionItems: reportData.actionItems.length
+    };
+
+    setReportHistory(prev => {
+      const updated = [...prev, historyEntry].slice(-20); // Keep last 20
+      try {
+        localStorage.setItem(`${REPORT_HISTORY_KEY}_${project.id}`, JSON.stringify(updated));
+        // Dispatch custom event for real-time sidebar status update
+        window.dispatchEvent(new CustomEvent('statusReportGenerated', { detail: { projectId: project.id } }));
+      } catch (e) {
+        console.error('Failed to save history:', e);
+      }
+      return updated;
+    });
+  }, [project.id]);
+
+  // Toggle action item completion
+  const toggleActionItemCompletion = (itemId: string) => {
+    const updated = persistentActionItems.map(item => {
+      if (item.id === itemId) {
+        return {
+          ...item,
+          completed: !item.completed,
+          completedAt: !item.completed ? new Date().toISOString() : undefined
+        };
+      }
+      return item;
+    });
+    saveActionItems(updated);
+  };
+
+  // Delete persistent action item
+  const deleteActionItem = (itemId: string) => {
+    const updated = persistentActionItems.filter(item => item.id !== itemId);
+    saveActionItems(updated);
+  };
+
+  // Merge report action items with persistent ones
+  const mergeActionItems = useCallback((reportItems: StatusReport['actionItems']) => {
+    const existingIds = new Set(persistentActionItems.map(i => i.item.toLowerCase()));
+    const newItems: PersistentActionItem[] = reportItems
+      .filter(item => !existingIds.has(item.item.toLowerCase()))
+      .map(item => ({
+        id: `action_${Date.now()}_${Math.random().toString(36).slice(2)}`,
+        item: item.item,
+        owner: item.owner,
+        dueDate: item.dueDate,
+        priority: item.priority,
+        completed: false,
+        createdAt: new Date().toISOString()
+      }));
+
+    if (newItems.length > 0) {
+      saveActionItems([...persistentActionItems, ...newItems]);
+    }
+  }, [persistentActionItems, saveActionItems]);
+
+  // Save schedule settings
+  const saveScheduleSettings = (settings: { enabled: boolean; interval: 'daily' | 'weekly' | 'monthly' } | null) => {
+    setScheduledGeneration(settings);
+    try {
+      if (settings) {
+        localStorage.setItem(`${SCHEDULED_GENERATION_KEY}_${project.id}`, JSON.stringify(settings));
+      } else {
+        localStorage.removeItem(`${SCHEDULED_GENERATION_KEY}_${project.id}`);
+      }
+    } catch (e) {
+      console.error('Failed to save schedule settings:', e);
+    }
+  };
 
   // Load cached report
   useEffect(() => {
@@ -75,6 +249,12 @@ const StatusReportView: React.FC<StatusReportViewProps> = ({
   const handleGenerate = async () => {
     setIsGenerating(true);
     setError(null);
+    setGenerationProgress(0);
+
+    // Simulate progress for better UX
+    const progressInterval = setInterval(() => {
+      setGenerationProgress(prev => Math.min(prev + 12, 90));
+    }, 350);
 
     try {
       const conflicts = (project as any).conflicts as RequirementConflict[] | undefined;
@@ -91,12 +271,21 @@ const StatusReportView: React.FC<StatusReportViewProps> = ({
         conflicts
       );
 
+      setGenerationProgress(100);
+      clearInterval(progressInterval);
       setReport(statusReport);
+
+      // Save to history for comparison
+      saveToHistory(statusReport);
+
+      // Merge action items into persistent storage
+      mergeActionItems(statusReport.actionItems);
 
       // Cache in project state
       const updated = { ...project, statusReport } as ProjectState;
       onUpdate(updated);
     } catch (err) {
+      clearInterval(progressInterval);
       console.error('Status report generation failed:', err);
       setError('Failed to generate status report. Please try again.');
     } finally {
@@ -234,7 +423,7 @@ ${report.nextSteps.map(n => `• ${n}`).join('\n')}
     );
   }
 
-  // Loading state
+  // Loading state with progress
   if (isGenerating) {
     return (
       <div className="max-w-4xl mx-auto py-20 text-center animate-in fade-in duration-500">
@@ -242,7 +431,19 @@ ${report.nextSteps.map(n => `• ${n}`).join('\n')}
           <Loader className="h-8 w-8 text-blue-600 animate-spin" />
         </div>
         <h3 className="text-xl font-bold text-slate-900 mb-2">Generating Status Report...</h3>
-        <p className="text-slate-500">Analyzing project data and synthesizing insights</p>
+        <p className="text-slate-500 mb-4">Analyzing project data and synthesizing insights</p>
+        {/* Progress Bar */}
+        <div className="max-w-xs mx-auto">
+          <div className="h-2 bg-slate-200 rounded-full overflow-hidden">
+            <motion.div 
+              className="h-full bg-blue-500 rounded-full"
+              initial={{ width: 0 }}
+              animate={{ width: `${generationProgress}%` }}
+              transition={{ duration: 0.3 }}
+            />
+          </div>
+          <p className="text-xs text-slate-400 mt-2">{generationProgress}% complete</p>
+        </div>
       </div>
     );
   }
@@ -283,6 +484,20 @@ ${report.nextSteps.map(n => `• ${n}`).join('\n')}
             </p>
           </div>
           <div className="flex items-center gap-3">
+            {reportHistory.length > 1 && (
+              <Button 
+                variant="outline"
+                onClick={() => setShowHistoryModal(true)}
+              >
+                <History className="h-4 w-4 mr-2" /> Compare
+              </Button>
+            )}
+            <Button 
+              variant="outline"
+              onClick={() => setShowScheduleModal(true)}
+            >
+              <Timer className="h-4 w-4 mr-2" /> {scheduledGeneration?.enabled ? 'Scheduled' : 'Schedule'}
+            </Button>
             <Button 
               variant="outline"
               onClick={handleCopy}
@@ -451,35 +666,73 @@ ${report.nextSteps.map(n => `• ${n}`).join('\n')}
           <section className="bg-white rounded-3xl border border-slate-100 shadow-sm p-8">
             <h2 className="text-xl font-bold text-slate-900 mb-6 flex items-center gap-2">
               <Zap className="h-5 w-5 text-amber-600" /> Action Items
+              <span className="ml-auto text-sm font-normal text-slate-500">
+                {persistentActionItems.filter(i => i.completed).length}/{persistentActionItems.length} completed
+              </span>
             </h2>
-            <div className="overflow-x-auto">
-              <table className="w-full">
-                <thead>
-                  <tr className="border-b border-slate-100">
-                    <th className="text-left py-3 px-4 text-xs font-bold text-slate-500 uppercase tracking-wider">Item</th>
-                    <th className="text-left py-3 px-4 text-xs font-bold text-slate-500 uppercase tracking-wider">Owner</th>
-                    <th className="text-left py-3 px-4 text-xs font-bold text-slate-500 uppercase tracking-wider">Due Date</th>
-                    <th className="text-left py-3 px-4 text-xs font-bold text-slate-500 uppercase tracking-wider">Priority</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {report.actionItems.map((item, idx) => {
-                    const priorityConfig = PRIORITY_COLORS[item.priority];
-                    return (
-                      <tr key={idx} className="border-b border-slate-50 hover:bg-slate-50 transition-colors">
-                        <td className="py-4 px-4 font-medium text-slate-900">{item.item}</td>
-                        <td className="py-4 px-4 text-slate-600">{item.owner}</td>
-                        <td className="py-4 px-4 text-slate-600">{item.dueDate}</td>
-                        <td className="py-4 px-4">
-                          <span className={`px-2.5 py-1 rounded-full text-xs font-bold ${priorityConfig.bg} ${priorityConfig.text}`}>
-                            {item.priority.toUpperCase()}
+            
+            {/* Persistent Action Items with checkboxes */}
+            <div className="space-y-3">
+              {persistentActionItems.length > 0 ? (
+                persistentActionItems.map((item) => {
+                  const priorityConfig = PRIORITY_COLORS[item.priority];
+                  return (
+                    <motion.div
+                      key={item.id}
+                      initial={{ opacity: 0 }}
+                      animate={{ opacity: 1 }}
+                      className={`flex items-start gap-4 p-4 rounded-xl border transition-all ${
+                        item.completed 
+                          ? 'bg-emerald-50 border-emerald-100' 
+                          : 'bg-white border-slate-100 hover:border-slate-200'
+                      }`}
+                    >
+                      <button
+                        onClick={() => toggleActionItemCompletion(item.id)}
+                        className="mt-1 flex-shrink-0"
+                      >
+                        {item.completed ? (
+                          <CheckSquare className="h-5 w-5 text-emerald-600" />
+                        ) : (
+                          <Square className="h-5 w-5 text-slate-400 hover:text-slate-600" />
+                        )}
+                      </button>
+                      <div className="flex-1 min-w-0">
+                        <p className={`font-medium ${item.completed ? 'text-slate-500 line-through' : 'text-slate-900'}`}>
+                          {item.item}
+                        </p>
+                        <div className="flex flex-wrap items-center gap-3 mt-2 text-sm text-slate-500">
+                          <span className="flex items-center gap-1">
+                            <Users className="h-3 w-3" /> {item.owner}
                           </span>
-                        </td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
+                          <span className="flex items-center gap-1">
+                            <Calendar className="h-3 w-3" /> {item.dueDate}
+                          </span>
+                          {item.completedAt && (
+                            <span className="text-emerald-600 flex items-center gap-1">
+                              <Check className="h-3 w-3" /> Completed {new Date(item.completedAt).toLocaleDateString()}
+                            </span>
+                          )}
+                        </div>
+                      </div>
+                      <span className={`px-2.5 py-1 rounded-full text-xs font-bold ${priorityConfig.bg} ${priorityConfig.text}`}>
+                        {item.priority.toUpperCase()}
+                      </span>
+                      <button
+                        onClick={() => deleteActionItem(item.id)}
+                        className="p-1 text-slate-400 hover:text-red-500 transition-colors"
+                      >
+                        <Trash2 className="h-4 w-4" />
+                      </button>
+                    </motion.div>
+                  );
+                })
+              ) : (
+                <div className="text-center py-8 text-slate-500">
+                  <CheckSquare className="h-12 w-12 text-slate-300 mx-auto mb-3" />
+                  <p>No action items yet. Generate a report to get action items.</p>
+                </div>
+              )}
             </div>
           </section>
 
@@ -516,6 +769,228 @@ ${report.nextSteps.map(n => `• ${n}`).join('\n')}
               </ul>
             </section>
           </div>
+        </div>
+      )}
+
+      {/* History Comparison Modal */}
+      {showHistoryModal && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4 animate-in fade-in duration-200">
+          <motion.div 
+            initial={{ opacity: 0, scale: 0.95 }}
+            animate={{ opacity: 1, scale: 1 }}
+            className="bg-white rounded-2xl shadow-2xl max-w-4xl w-full max-h-[80vh] overflow-hidden"
+          >
+            <div className="px-6 py-4 border-b bg-gradient-to-r from-blue-50 to-indigo-50 flex items-center justify-between">
+              <div>
+                <h3 className="font-bold text-lg text-slate-900 flex items-center gap-2">
+                  <GitCompare className="h-5 w-5 text-blue-600" />
+                  Report History & Comparison
+                </h3>
+                <p className="text-sm text-slate-600">{reportHistory.length} reports generated</p>
+              </div>
+              <button
+                onClick={() => setShowHistoryModal(false)}
+                className="p-2 hover:bg-white rounded-lg transition-colors"
+              >
+                <X className="h-5 w-5 text-slate-600" />
+              </button>
+            </div>
+            <div className="p-6 overflow-y-auto max-h-[60vh]">
+              {/* Comparison View */}
+              {comparisonReport && report && (
+                <div className="mb-6 p-4 bg-blue-50 rounded-xl border border-blue-100">
+                  <h4 className="font-bold text-blue-900 mb-3">Comparison: Current vs {new Date(comparisonReport.generatedAt).toLocaleDateString()}</h4>
+                  <div className="grid grid-cols-3 gap-4">
+                    <div className="text-center p-3 bg-white rounded-lg">
+                      <div className="text-2xl font-bold text-slate-900">
+                        {(() => {
+                          const currentAvg = report.progressMetrics.length > 0 
+                            ? Math.round(report.progressMetrics.reduce((a, m) => a + m.current, 0) / report.progressMetrics.length)
+                            : 0;
+                          const diff = currentAvg - comparisonReport.averageProgress;
+                          return (
+                            <span className={diff >= 0 ? 'text-emerald-600' : 'text-red-600'}>
+                              {diff > 0 ? '+' : ''}{diff}%
+                            </span>
+                          );
+                        })()}
+                      </div>
+                      <div className="text-xs text-slate-500">Progress Change</div>
+                    </div>
+                    <div className="text-center p-3 bg-white rounded-lg">
+                      <div className="text-2xl font-bold text-slate-900">
+                        {(() => {
+                          const diff = report.activeRisks.length - comparisonReport.totalRisks;
+                          return (
+                            <span className={diff <= 0 ? 'text-emerald-600' : 'text-red-600'}>
+                              {diff > 0 ? '+' : ''}{diff}
+                            </span>
+                          );
+                        })()}
+                      </div>
+                      <div className="text-xs text-slate-500">Risks Change</div>
+                    </div>
+                    <div className="text-center p-3 bg-white rounded-lg">
+                      <div className="text-2xl font-bold text-slate-900">
+                        {(() => {
+                          const diff = report.actionItems.length - comparisonReport.totalActionItems;
+                          return (
+                            <span className={diff <= 0 ? 'text-emerald-600' : 'text-amber-600'}>
+                              {diff > 0 ? '+' : ''}{diff}
+                            </span>
+                          );
+                        })()}
+                      </div>
+                      <div className="text-xs text-slate-500">Action Items</div>
+                    </div>
+                  </div>
+                  <button 
+                    onClick={() => setComparisonReport(null)}
+                    className="mt-3 text-xs text-blue-600 hover:text-blue-700"
+                  >
+                    Clear comparison
+                  </button>
+                </div>
+              )}
+
+              {/* History List */}
+              <div className="space-y-3">
+                {[...reportHistory].reverse().map((entry, idx) => (
+                  <div 
+                    key={entry.id} 
+                    className={`flex items-center justify-between p-4 rounded-xl border transition-colors ${
+                      comparisonReport?.id === entry.id 
+                        ? 'bg-blue-50 border-blue-200' 
+                        : 'bg-white border-slate-100 hover:border-slate-200'
+                    }`}
+                  >
+                    <div className="flex-1">
+                      <div className="flex items-center gap-2">
+                        <Calendar className="h-4 w-4 text-slate-400" />
+                        <span className="font-medium text-slate-900">
+                          {new Date(entry.generatedAt).toLocaleString()}
+                        </span>
+                        {idx === 0 && (
+                          <span className="px-2 py-0.5 bg-blue-100 text-blue-700 rounded text-xs font-bold">
+                            Latest
+                          </span>
+                        )}
+                      </div>
+                      <p className="text-sm text-slate-500 mt-1 line-clamp-1">{entry.executiveSummary}</p>
+                    </div>
+                    <div className="flex items-center gap-4 ml-4">
+                      <div className="text-right">
+                        <div className="text-sm font-bold text-slate-900">{entry.averageProgress}%</div>
+                        <div className="text-xs text-slate-500">Progress</div>
+                      </div>
+                      <div className="text-right">
+                        <div className="text-sm font-bold text-slate-900">{entry.totalRisks}</div>
+                        <div className="text-xs text-slate-500">Risks</div>
+                      </div>
+                      {idx !== 0 && (
+                        <Button 
+                          variant="outline" 
+                          onClick={() => setComparisonReport(entry)}
+                          className="text-xs"
+                        >
+                          Compare
+                        </Button>
+                      )}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+            <div className="px-6 py-4 border-t border-slate-100 bg-slate-50 flex justify-end">
+              <Button variant="outline" onClick={() => setShowHistoryModal(false)}>
+                Close
+              </Button>
+            </div>
+          </motion.div>
+        </div>
+      )}
+
+      {/* Schedule Generation Modal */}
+      {showScheduleModal && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4 animate-in fade-in duration-200">
+          <motion.div 
+            initial={{ opacity: 0, scale: 0.95 }}
+            animate={{ opacity: 1, scale: 1 }}
+            className="bg-white rounded-2xl shadow-2xl max-w-md w-full overflow-hidden"
+          >
+            <div className="px-6 py-4 border-b bg-gradient-to-r from-blue-50 to-indigo-50 flex items-center justify-between">
+              <div>
+                <h3 className="font-bold text-lg text-slate-900 flex items-center gap-2">
+                  <Timer className="h-5 w-5 text-blue-600" />
+                  Schedule Generation
+                </h3>
+                <p className="text-sm text-slate-600">Automatic report generation</p>
+              </div>
+              <button
+                onClick={() => setShowScheduleModal(false)}
+                className="p-2 hover:bg-white rounded-lg transition-colors"
+              >
+                <X className="h-5 w-5 text-slate-600" />
+              </button>
+            </div>
+            <div className="p-6">
+              <p className="text-slate-600 mb-6">
+                Set up automatic status report generation. Reports will be generated and saved to history.
+              </p>
+              
+              <div className="space-y-3">
+                {['daily', 'weekly', 'monthly'].map((interval) => (
+                  <button
+                    key={interval}
+                    onClick={() => saveScheduleSettings({ enabled: true, interval: interval as any })}
+                    className={`w-full p-4 rounded-xl border text-left transition-all ${
+                      scheduledGeneration?.enabled && scheduledGeneration.interval === interval
+                        ? 'bg-blue-50 border-blue-200'
+                        : 'bg-white border-slate-200 hover:border-slate-300'
+                    }`}
+                  >
+                    <div className="flex items-center justify-between">
+                      <div>
+                        <div className="font-medium text-slate-900 capitalize">{interval}</div>
+                        <div className="text-sm text-slate-500">
+                          {interval === 'daily' && 'Generate a report every day'}
+                          {interval === 'weekly' && 'Generate a report every week'}
+                          {interval === 'monthly' && 'Generate a report every month'}
+                        </div>
+                      </div>
+                      {scheduledGeneration?.enabled && scheduledGeneration.interval === interval && (
+                        <CheckCircle2 className="h-5 w-5 text-blue-600" />
+                      )}
+                    </div>
+                  </button>
+                ))}
+              </div>
+
+              {scheduledGeneration?.enabled && (
+                <button
+                  onClick={() => saveScheduleSettings(null)}
+                  className="mt-4 w-full p-3 text-red-600 hover:bg-red-50 rounded-xl transition-colors text-sm font-medium"
+                >
+                  Disable scheduled generation
+                </button>
+              )}
+
+              <div className="mt-6 p-4 bg-amber-50 rounded-xl border border-amber-100">
+                <div className="flex items-center gap-2 text-amber-700">
+                  <AlertTriangle className="h-4 w-4" />
+                  <span className="text-sm font-medium">Note</span>
+                </div>
+                <p className="text-sm text-amber-600 mt-1">
+                  Scheduled generation requires the app to be open. For true automation, consider setting up system-level scheduled tasks.
+                </p>
+              </div>
+            </div>
+            <div className="px-6 py-4 border-t border-slate-100 bg-slate-50 flex justify-end">
+              <Button variant="outline" onClick={() => setShowScheduleModal(false)}>
+                Done
+              </Button>
+            </div>
+          </motion.div>
         </div>
       )}
     </div>

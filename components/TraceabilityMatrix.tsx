@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect, useCallback } from 'react';
 import { 
   Table2, 
   Download, 
@@ -19,13 +19,20 @@ import {
   Layers,
   Target,
   SortAsc,
-  SortDesc
+  SortDesc,
+  Wand2,
+  Loader,
+  RefreshCw,
+  GitBranch,
+  FileSpreadsheet,
+  Network,
+  X
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import Button from './Button';
 import Tooltip from './Tooltip';
 import { ProjectState, Insight, BRDSection } from '../utils/db';
-import { generateTraceabilityMatrix, TraceabilityEntry } from '../utils/services/ai';
+import { generateTraceabilityMatrix, TraceabilityEntry, enhanceTraceabilityMatrix, generateDependencyGraph } from '../utils/services/ai';
 import { SourceBadge } from '../utils/sourceIcons';
 
 interface TraceabilityMatrixProps {
@@ -64,7 +71,42 @@ const TraceabilityMatrix: React.FC<TraceabilityMatrixProps> = ({
   const [sortDirection, setSortDirection] = useState<SortDirection>('asc');
   const [expandedRows, setExpandedRows] = useState<Set<string>>(new Set());
   const [copied, setCopied] = useState(false);
-  const [viewMode, setViewMode] = useState<'table' | 'cards'>('table');
+  const [viewMode, setViewMode] = useState<'table' | 'cards' | 'graph'>('table');
+  const [isEnhancing, setIsEnhancing] = useState(false);
+  const [enhancedData, setEnhancedData] = useState<{ 
+    dependencies: Record<string, string[]>; 
+    testCriteria: Record<string, string>;
+    stakeholders: Record<string, { name: string; role: string; confidence: number }[]>;
+  }>({ dependencies: {}, testCriteria: {}, stakeholders: {} });
+  
+  // === NEW: Graph visualization state ===
+  const [graphData, setGraphData] = useState<{
+    nodes: { id: string; label: string; category: string; level: number }[];
+    edges: { source: string; target: string; type: string }[];
+  } | null>(null);
+  const [selectedNode, setSelectedNode] = useState<string | null>(null);
+  
+  // === NEW: Export format selection ===
+  const [showExportMenu, setShowExportMenu] = useState(false);
+
+  // AI Enhancement handler
+  const handleEnhanceWithAI = async () => {
+    if (!project.insights || project.insights.length === 0) return;
+    
+    setIsEnhancing(true);
+    try {
+      const enhanced = await enhanceTraceabilityMatrix(project.insights);
+      setEnhancedData(enhanced);
+      
+      // Also generate graph data
+      const graph = await generateDependencyGraph(project.insights, enhanced);
+      setGraphData(graph);
+    } catch (error) {
+      console.error('Enhancement failed:', error);
+    } finally {
+      setIsEnhancing(false);
+    }
+  };
 
   // Generate matrix from project data
   const matrix = useMemo(() => {
@@ -79,11 +121,34 @@ const TraceabilityMatrix: React.FC<TraceabilityMatrixProps> = ({
         s.content.toLowerCase().includes(req.summary.toLowerCase().slice(0, 30))
       ).map(s => s.title) || [];
 
-      // Extract stakeholders mentioned
-      const stakeholderKeywords = ['team', 'manager', 'user', 'admin', 'customer', 'client', 'developer', 'analyst', 'owner', 'lead'];
-      const mentionedStakeholders = stakeholderKeywords.filter(k => 
-        req.detail.toLowerCase().includes(k) || req.summary.toLowerCase().includes(k)
-      );
+      // Use AI-enhanced stakeholders if available, otherwise use keyword detection
+      const aiStakeholders = enhancedData.stakeholders[req.id] || [];
+      let stakeholders: string[];
+      
+      if (aiStakeholders.length > 0) {
+        stakeholders = aiStakeholders.map(s => `${s.name} (${s.role})`);
+      } else {
+        // Fallback to improved keyword detection
+        const stakeholderKeywords = [
+          'team', 'manager', 'user', 'admin', 'customer', 'client', 
+          'developer', 'analyst', 'owner', 'lead', 'director', 'engineer',
+          'stakeholder', 'executive', 'sponsor', 'PM', 'QA', 'architect'
+        ];
+        const mentionedStakeholders = stakeholderKeywords.filter(k => 
+          req.detail.toLowerCase().includes(k) || req.summary.toLowerCase().includes(k)
+        );
+        stakeholders = mentionedStakeholders.length > 0 ? mentionedStakeholders : ['Project Team'];
+      }
+
+      // Use AI-enhanced data if available
+      const aiDeps = enhancedData.dependencies[req.id] || [];
+      const aiTestCriteria = enhancedData.testCriteria[req.id];
+      
+      // Map dependency IDs to REQ-XXX format
+      const depLabels = aiDeps.map(depId => {
+        const depIdx = requirements.findIndex(r => r.id === depId);
+        return depIdx >= 0 ? `REQ-${String(depIdx + 1).padStart(3, '0')}` : null;
+      }).filter(Boolean) as string[];
 
       return {
         requirementId: `REQ-${String(idx + 1).padStart(3, '0')}`,
@@ -92,15 +157,15 @@ const TraceabilityMatrix: React.FC<TraceabilityMatrixProps> = ({
         source: req.source,
         sourceType: req.sourceType,
         brdSections: matchedSections.length > 0 ? matchedSections : ['Functional Requirements'],
-        stakeholders: mentionedStakeholders.length > 0 ? mentionedStakeholders : ['Project Team'],
+        stakeholders,
         status: req.includedInBRD ? 'implemented' : 'pending',
         priority: req.confidence === 'high' ? 'high' : req.confidence === 'medium' ? 'medium' : 'low',
         confidence: req.confidence,
-        dependencies: [],
-        testCriteria: `Verify: ${req.summary.slice(0, 80)}...`
+        dependencies: depLabels,
+        testCriteria: aiTestCriteria || `Given the system is operational, when ${req.summary.slice(0, 50).toLowerCase()}, then the expected behavior should be verified.`
       };
     });
-  }, [project]);
+  }, [project, enhancedData]);
 
   // Filter and sort matrix
   const filteredMatrix = useMemo(() => {
@@ -142,6 +207,64 @@ const TraceabilityMatrix: React.FC<TraceabilityMatrixProps> = ({
 
     return result;
   }, [matrix, searchQuery, filterCategory, filterPriority, filterStatus, sortField, sortDirection]);
+
+  // Helper function for XML escaping
+  const escapeXml = (str: string): string => {
+    return str
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&apos;');
+  };
+
+  // === Excel/XLSX Export ===
+  const handleExportExcel = useCallback(async () => {
+    // Create workbook data structure
+    const headers = ['Requirement ID', 'Summary', 'Category', 'Source', 'Source Type', 'BRD Sections', 'Stakeholders', 'Status', 'Priority', 'Confidence', 'Dependencies', 'Test Criteria'];
+    
+    const data = filteredMatrix.map(entry => [
+      entry.requirementId,
+      entry.requirementSummary,
+      entry.category,
+      entry.source,
+      entry.sourceType,
+      entry.brdSections.join('; '),
+      entry.stakeholders.join('; '),
+      entry.status,
+      entry.priority,
+      entry.confidence,
+      entry.dependencies.join('; '),
+      entry.testCriteria || ''
+    ]);
+    
+    // Create XML-based Excel file (works without external libraries)
+    const xmlContent = `<?xml version="1.0" encoding="UTF-8"?>
+<?mso-application progid="Excel.Sheet"?>
+<Workbook xmlns="urn:schemas-microsoft-com:office:spreadsheet"
+ xmlns:ss="urn:schemas-microsoft-com:office:spreadsheet">
+  <Worksheet ss:Name="Traceability Matrix">
+    <Table>
+      <Row>
+        ${headers.map(h => `<Cell><Data ss:Type="String">${escapeXml(h)}</Data></Cell>`).join('')}
+      </Row>
+      ${data.map(row => `
+      <Row>
+        ${row.map(cell => `<Cell><Data ss:Type="String">${escapeXml(String(cell || ''))}</Data></Cell>`).join('')}
+      </Row>`).join('')}
+    </Table>
+  </Worksheet>
+</Workbook>`;
+    
+    const blob = new Blob([xmlContent], { type: 'application/vnd.ms-excel' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `${project.name}_RTM_${new Date().toISOString().split('T')[0]}.xls`;
+    a.click();
+    URL.revokeObjectURL(url);
+    setShowExportMenu(false);
+  }, [filteredMatrix, project.name]);
 
   // Stats
   const stats = useMemo(() => ({
@@ -243,6 +366,21 @@ const TraceabilityMatrix: React.FC<TraceabilityMatrixProps> = ({
             </p>
           </div>
           <div className="flex items-center gap-3">
+            <Tooltip content="AI generates dependencies, test criteria, and stakeholders">
+              <Button 
+                variant="outline"
+                onClick={handleEnhanceWithAI}
+                disabled={isEnhancing}
+                className="hidden md:flex"
+              >
+                {isEnhancing ? (
+                  <Loader className="h-4 w-4 mr-2 animate-spin" />
+                ) : (
+                  <Wand2 className="h-4 w-4 mr-2" />
+                )}
+                {isEnhancing ? 'Enhancing...' : 'Enhance with AI'}
+              </Button>
+            </Tooltip>
             <Button 
               variant="outline"
               onClick={handleCopyToClipboard}
@@ -251,9 +389,34 @@ const TraceabilityMatrix: React.FC<TraceabilityMatrixProps> = ({
               {copied ? <Check className="h-4 w-4 mr-2 text-emerald-600" /> : <Copy className="h-4 w-4 mr-2" />}
               {copied ? 'Copied!' : 'Copy'}
             </Button>
-            <Button onClick={handleExportCSV} className="shadow-lg shadow-purple-500/20">
-              <Download className="h-4 w-4 mr-2" /> Export CSV
-            </Button>
+            
+            {/* Export Menu */}
+            <div className="relative">
+              <Button 
+                onClick={() => setShowExportMenu(!showExportMenu)} 
+                className="shadow-lg shadow-purple-500/20"
+              >
+                <Download className="h-4 w-4 mr-2" /> Export
+              </Button>
+              {showExportMenu && (
+                <div className="absolute right-0 mt-2 w-48 bg-white rounded-xl shadow-lg border border-slate-100 py-2 z-50">
+                  <button
+                    onClick={handleExportCSV}
+                    className="w-full px-4 py-2 text-left text-sm hover:bg-slate-50 flex items-center gap-2"
+                  >
+                    <FileText className="h-4 w-4 text-slate-500" />
+                    Export as CSV
+                  </button>
+                  <button
+                    onClick={handleExportExcel}
+                    className="w-full px-4 py-2 text-left text-sm hover:bg-slate-50 flex items-center gap-2"
+                  >
+                    <FileSpreadsheet className="h-4 w-4 text-green-600" />
+                    Export as Excel
+                  </button>
+                </div>
+              )}
+            </div>
           </div>
         </div>
 
@@ -330,6 +493,14 @@ const TraceabilityMatrix: React.FC<TraceabilityMatrixProps> = ({
               }`}
             >
               Cards
+            </button>
+            <button
+              onClick={() => setViewMode('graph')}
+              className={`px-3 py-1.5 rounded-md text-sm font-medium transition-colors flex items-center gap-1 ${
+                viewMode === 'graph' ? 'bg-white shadow-sm text-purple-700' : 'text-slate-600 hover:text-slate-900'
+              }`}
+            >
+              <Network className="h-3 w-3" /> Graph
             </button>
           </div>
         </div>
@@ -518,12 +689,215 @@ const TraceabilityMatrix: React.FC<TraceabilityMatrixProps> = ({
                   </div>
                   <div className="flex items-center gap-2 text-slate-500">
                     <Users className="h-3 w-3" />
-                    <span>{entry.stakeholders.join(', ')}</span>
+                    <span>{entry.stakeholders.slice(0, 2).join(', ')}{entry.stakeholders.length > 2 ? '...' : ''}</span>
                   </div>
+                  {entry.dependencies.length > 0 && (
+                    <div className="flex items-center gap-2 text-purple-600">
+                      <GitBranch className="h-3 w-3" />
+                      <span>Depends on: {entry.dependencies.join(', ')}</span>
+                    </div>
+                  )}
                 </div>
               </motion.div>
             );
           })}
+        </div>
+      )}
+
+      {/* Dependency Graph View */}
+      {viewMode === 'graph' && (
+        <div className="bg-white rounded-2xl border border-slate-100 shadow-sm overflow-hidden">
+          {!graphData && Object.keys(enhancedData.dependencies).length === 0 ? (
+            <div className="text-center py-20">
+              <Network className="h-16 w-16 text-slate-300 mx-auto mb-4" />
+              <h3 className="text-lg font-bold text-slate-700 mb-2">Dependency Graph</h3>
+              <p className="text-slate-500 mb-6 max-w-md mx-auto">
+                Run AI Enhancement to detect dependencies between requirements and visualize them.
+              </p>
+              <Button onClick={handleEnhanceWithAI} disabled={isEnhancing}>
+                {isEnhancing ? <Loader className="h-4 w-4 mr-2 animate-spin" /> : <Wand2 className="h-4 w-4 mr-2" />}
+                Enhance with AI
+              </Button>
+            </div>
+          ) : (
+            <div className="p-6">
+              <div className="flex items-center justify-between mb-6">
+                <h3 className="font-bold text-slate-900 flex items-center gap-2">
+                  <Network className="h-5 w-5 text-purple-600" />
+                  Dependency Graph
+                </h3>
+                <div className="flex items-center gap-4 text-sm text-slate-500">
+                  <span className="flex items-center gap-1">
+                    <div className="w-3 h-3 rounded-full bg-purple-500" /> Requirement
+                  </span>
+                  <span className="flex items-center gap-1">
+                    <ArrowRight className="h-3 w-3" /> Depends on
+                  </span>
+                </div>
+              </div>
+              
+              {/* Simple SVG-based dependency graph */}
+              <div className="relative bg-gradient-to-br from-slate-50 to-purple-50/30 rounded-xl p-8 min-h-[400px] overflow-auto">
+                {/* Group nodes by level */}
+                {graphData && (() => {
+                  const levels: Record<number, typeof graphData.nodes> = {};
+                  graphData.nodes.forEach(n => {
+                    if (!levels[n.level]) levels[n.level] = [];
+                    levels[n.level].push(n);
+                  });
+                  
+                  const maxLevel = Math.max(...Object.keys(levels).map(Number));
+                  const levelWidth = 200;
+                  const nodeHeight = 60;
+                  
+                  return (
+                    <svg 
+                      width={Math.max((maxLevel + 1) * levelWidth + 100, 800)} 
+                      height={Math.max(...Object.values(levels).map(l => l.length)) * nodeHeight + 100}
+                      className="mx-auto"
+                    >
+                      {/* Draw edges */}
+                      {graphData.edges.map((edge, idx) => {
+                        const sourceNode = graphData.nodes.find(n => n.id === edge.source);
+                        const targetNode = graphData.nodes.find(n => n.id === edge.target);
+                        if (!sourceNode || !targetNode) return null;
+                        
+                        const sourceLevel = levels[sourceNode.level];
+                        const targetLevel = levels[targetNode.level];
+                        const sourceIdx = sourceLevel?.indexOf(sourceNode) || 0;
+                        const targetIdx = targetLevel?.indexOf(targetNode) || 0;
+                        
+                        const x1 = sourceNode.level * levelWidth + 140;
+                        const y1 = sourceIdx * nodeHeight + 50;
+                        const x2 = targetNode.level * levelWidth + 60;
+                        const y2 = targetIdx * nodeHeight + 50;
+                        
+                        return (
+                          <g key={idx}>
+                            <defs>
+                              <marker id={`arrowhead-${idx}`} markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+                                <polygon points="0 0, 10 3.5, 0 7" fill="#8b5cf6" />
+                              </marker>
+                            </defs>
+                            <path
+                              d={`M${x1},${y1} C${x1 + 50},${y1} ${x2 - 50},${y2} ${x2},${y2}`}
+                              fill="none"
+                              stroke="#8b5cf6"
+                              strokeWidth={2}
+                              strokeOpacity={0.6}
+                              markerEnd={`url(#arrowhead-${idx})`}
+                            />
+                          </g>
+                        );
+                      })}
+                      
+                      {/* Draw nodes */}
+                      {Object.entries(levels).map(([level, nodes]) => 
+                        nodes.map((node, idx) => {
+                          const x = Number(level) * levelWidth + 60;
+                          const y = idx * nodeHeight + 30;
+                          const entry = filteredMatrix.find(m => m.requirementId === node.label);
+                          const isSelected = selectedNode === node.id;
+                          
+                          return (
+                            <g 
+                              key={node.id}
+                              onClick={() => setSelectedNode(isSelected ? null : node.id)}
+                              className="cursor-pointer"
+                            >
+                              <rect
+                                x={x}
+                                y={y}
+                                width={80}
+                                height={40}
+                                rx={8}
+                                fill={isSelected ? '#8b5cf6' : '#fff'}
+                                stroke={isSelected ? '#7c3aed' : '#e2e8f0'}
+                                strokeWidth={isSelected ? 2 : 1}
+                              />
+                              <text
+                                x={x + 40}
+                                y={y + 25}
+                                textAnchor="middle"
+                                fontSize={12}
+                                fontWeight={600}
+                                fill={isSelected ? '#fff' : '#7c3aed'}
+                              >
+                                {node.label}
+                              </text>
+                            </g>
+                          );
+                        })
+                      )}
+                    </svg>
+                  );
+                })()}
+                
+                {/* Fallback when no graph data but have dependencies */}
+                {!graphData && Object.keys(enhancedData.dependencies).length > 0 && (
+                  <div className="space-y-4">
+                    {filteredMatrix.filter(m => m.dependencies.length > 0).map((entry, idx) => (
+                      <div key={entry.requirementId} className="flex items-center gap-4 p-4 bg-white rounded-xl border border-slate-100">
+                        <div className="px-3 py-2 bg-purple-100 rounded-lg font-mono text-sm font-bold text-purple-700">
+                          {entry.requirementId}
+                        </div>
+                        <ArrowRight className="h-4 w-4 text-slate-400" />
+                        <div className="flex items-center gap-2">
+                          <span className="text-sm text-slate-600">depends on:</span>
+                          {entry.dependencies.map(dep => (
+                            <span key={dep} className="px-2 py-1 bg-slate-100 rounded font-mono text-xs font-medium text-slate-700">
+                              {dep}
+                            </span>
+                          ))}
+                        </div>
+                      </div>
+                    ))}
+                    {filteredMatrix.filter(m => m.dependencies.length > 0).length === 0 && (
+                      <div className="text-center py-12 text-slate-500">
+                        No dependencies detected between requirements.
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+              
+              {/* Selected node details */}
+              {selectedNode && graphData && (
+                <motion.div
+                  initial={{ opacity: 0, y: 10 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  className="mt-4 p-4 bg-purple-50 rounded-xl border border-purple-100"
+                >
+                  {(() => {
+                    const node = graphData.nodes.find(n => n.id === selectedNode);
+                    const entry = filteredMatrix.find(m => project.insights?.find(i => i.id === selectedNode)?.summary === m.requirementSummary);
+                    if (!node) return null;
+                    
+                    return (
+                      <div className="flex items-start justify-between">
+                        <div>
+                          <h4 className="font-bold text-purple-900 mb-1">{node.label}</h4>
+                          <p className="text-sm text-purple-700">{entry?.requirementSummary || 'No details available'}</p>
+                          {entry && (
+                            <div className="mt-2 flex items-center gap-2">
+                              {entry.dependencies.length > 0 && (
+                                <span className="text-xs text-purple-600">
+                                  Dependencies: {entry.dependencies.join(', ')}
+                                </span>
+                              )}
+                            </div>
+                          )}
+                        </div>
+                        <button onClick={() => setSelectedNode(null)} className="p-1 hover:bg-purple-100 rounded">
+                          <X className="h-4 w-4 text-purple-600" />
+                        </button>
+                      </div>
+                    );
+                  })()}
+                </motion.div>
+              )}
+            </div>
+          )}
         </div>
       )}
 

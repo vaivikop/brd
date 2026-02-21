@@ -571,7 +571,7 @@ const DashboardHome: React.FC<DashboardHomeProps> = ({ project, onNavigateToSour
             const pendingInsights = project.insights.filter(i => i.status !== 'approved' && i.status !== 'rejected');
             if (pendingInsights.length > 0) {
               updatedProject = await bulkUpdateInsights(
-                pendingInsights.map(i => ({ id: i.id, changes: { status: 'approved' as const } }))
+                pendingInsights.map(i => ({ insightId: i.id, updates: { status: 'approved' as const } }))
               );
               results.push(`Approved ${pendingInsights.length} insights`);
               await addActivityLog(`Bulk approved ${pendingInsights.length} insights`, 'Clarity AI');

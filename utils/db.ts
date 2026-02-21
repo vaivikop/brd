@@ -39,6 +39,29 @@ export interface Source {
   fileSize?: number; // Bytes
 }
 
+// MoSCoW prioritization levels
+export type MoSCoWPriority = 'must' | 'should' | 'could' | 'wont' | 'unset';
+
+// Comment on an insight
+export interface InsightComment {
+  id: string;
+  authorId: string;
+  authorName: string;
+  text: string;
+  timestamp: string;
+}
+
+// Source reference with snippet for preview
+export interface SourceReference {
+  sourceId: string;
+  sourceName: string;
+  sourceType: 'meeting' | 'email' | 'slack' | 'jira' | 'upload' | 'chat';
+  snippet: string;        // Relevant excerpt from source
+  highlightStart?: number; // Character position where insight was extracted
+  highlightEnd?: number;
+  timestamp: string;
+}
+
 export interface Insight {
   id: string;
   category: 'requirement' | 'decision' | 'stakeholder' | 'timeline' | 'question';
@@ -49,8 +72,40 @@ export interface Insight {
   confidence: 'high' | 'medium' | 'low';
   status: 'pending' | 'approved' | 'flagged' | 'rejected';
   timestamp: string;
-  includedInBRD?: boolean;  // Tracks if this insight was used in BRD generation
-  brdSections?: string[];   // Which BRD sections reference this insight
+  includedInBRD?: boolean;
+  brdSections?: string[];
+  
+  // === NEW: Multi-source Evidence ===
+  supportingSources?: SourceReference[];  // All sources that mention this insight
+  evidenceCount?: number;                 // Number of sources confirming this
+  confidenceScore?: number;               // 0-100 numeric confidence
+  
+  // === NEW: Conflict Detection ===
+  conflictingInsightIds?: string[];       // IDs of insights that contradict this
+  hasConflicts?: boolean;
+  
+  // === NEW: Deduplication ===
+  semanticHash?: string;                  // Hash for similarity detection
+  mergedFromIds?: string[];               // IDs of insights merged into this one
+  isMerged?: boolean;                     // This insight was merged into another
+  
+  // === NEW: Editing ===
+  originalSummary?: string;               // Original AI-generated summary
+  originalDetail?: string;                // Original AI-generated detail
+  isEdited?: boolean;
+  editHistory?: { summary: string; detail: string; timestamp: string; }[];
+  
+  // === NEW: MoSCoW Prioritization ===
+  priority?: MoSCoWPriority;
+  priorityOrder?: number;                 // For drag-and-drop ordering
+  stakeholderMentions?: string[];         // Which stakeholders mentioned this
+  
+  // === NEW: Collaboration ===
+  comments?: InsightComment[];
+  assignedTo?: string;                    // User ID assigned to review
+  assignedToName?: string;
+  discussionRequired?: boolean;
+  discussionNotes?: string;
 }
 
 export interface BRDSection {
@@ -59,6 +114,20 @@ export interface BRDSection {
   content: string;
   sources: string[];
   confidence: number;
+  contentHash?: string;  // Hash to detect content changes
+  approval?: {
+    status: 'pending' | 'approved' | 'needs-revision';
+    approvedBy?: string;
+    approvedAt?: string;
+    notes?: string;
+  };
+  comments?: {
+    id: string;
+    author: string;
+    text: string;
+    timestamp: string;
+    resolved: boolean;
+  }[];
 }
 
 export interface ProjectState {
@@ -368,6 +437,214 @@ export const updateInsightStatus = async (insightId: string, status: Insight['st
     });
 };
 
+// Bulk update insights in a single transaction - much faster than individual updates
+export const bulkUpdateInsightStatus = async (updates: { insightId: string; status: Insight['status'] }[]): Promise<ProjectState> => {
+    const db = await initDB();
+    const project = await getProjectData();
+    if (!project) throw new Error("No project found");
+
+    const updateMap = new Map(updates.map(u => [u.insightId, u.status]));
+    const updatedInsights = project.insights.map(insight => {
+        const newStatus = updateMap.get(insight.id);
+        return newStatus ? { ...insight, status: newStatus } : insight;
+    });
+
+    const updatedProject: ProjectState = {
+        ...project,
+        insights: updatedInsights,
+        lastUpdated: new Date().toISOString()
+    };
+
+    return new Promise((resolve, reject) => {
+        const transaction = db.transaction(PROJECT_STORE, 'readwrite');
+        const store = transaction.objectStore(PROJECT_STORE);
+        const request = store.put(updatedProject);
+        request.onsuccess = () => resolve(updatedProject);
+        request.onerror = () => reject(request.error);
+    });
+};
+
+// ============================================================================
+// INSIGHT MANAGEMENT - Enterprise Features
+// ============================================================================
+
+// Update a single insight with any fields
+export const updateInsight = async (insightId: string, updates: Partial<Insight>): Promise<ProjectState> => {
+    const db = await initDB();
+    const project = await getProjectData();
+    if (!project) throw new Error("No project found");
+
+    const updatedInsights = project.insights.map(insight => 
+        insight.id === insightId ? { ...insight, ...updates } : insight
+    );
+
+    const updatedProject: ProjectState = {
+        ...project,
+        insights: updatedInsights,
+        lastUpdated: new Date().toISOString()
+    };
+
+    return new Promise((resolve, reject) => {
+        const transaction = db.transaction(PROJECT_STORE, 'readwrite');
+        const store = transaction.objectStore(PROJECT_STORE);
+        const request = store.put(updatedProject);
+        request.onsuccess = () => resolve(updatedProject);
+        request.onerror = () => reject(request.error);
+    });
+};
+
+// Bulk update multiple insights at once
+export const bulkUpdateInsights = async (updates: { insightId: string; updates: Partial<Insight> }[]): Promise<ProjectState> => {
+    const db = await initDB();
+    const project = await getProjectData();
+    if (!project) throw new Error("No project found");
+
+    const updateMap = new Map(updates.map(u => [u.insightId, u.updates]));
+    const updatedInsights = project.insights.map(insight => {
+        const insightUpdates = updateMap.get(insight.id);
+        return insightUpdates ? { ...insight, ...insightUpdates } : insight;
+    });
+
+    const updatedProject: ProjectState = {
+        ...project,
+        insights: updatedInsights,
+        lastUpdated: new Date().toISOString()
+    };
+
+    return new Promise((resolve, reject) => {
+        const transaction = db.transaction(PROJECT_STORE, 'readwrite');
+        const store = transaction.objectStore(PROJECT_STORE);
+        const request = store.put(updatedProject);
+        request.onsuccess = () => resolve(updatedProject);
+        request.onerror = () => reject(request.error);
+    });
+};
+
+// Add a comment to an insight
+export const addInsightComment = async (insightId: string, comment: InsightComment): Promise<ProjectState> => {
+    const db = await initDB();
+    const project = await getProjectData();
+    if (!project) throw new Error("No project found");
+
+    const updatedInsights = project.insights.map(insight => {
+        if (insight.id === insightId) {
+            return {
+                ...insight,
+                comments: [...(insight.comments || []), comment]
+            };
+        }
+        return insight;
+    });
+
+    const updatedProject: ProjectState = {
+        ...project,
+        insights: updatedInsights,
+        lastUpdated: new Date().toISOString()
+    };
+
+    return new Promise((resolve, reject) => {
+        const transaction = db.transaction(PROJECT_STORE, 'readwrite');
+        const store = transaction.objectStore(PROJECT_STORE);
+        const request = store.put(updatedProject);
+        request.onsuccess = () => resolve(updatedProject);
+        request.onerror = () => reject(request.error);
+    });
+};
+
+// Merge duplicate insights
+export const mergeInsights = async (primaryId: string, duplicateIds: string[]): Promise<ProjectState> => {
+    const db = await initDB();
+    const project = await getProjectData();
+    if (!project) throw new Error("No project found");
+
+    const primary = project.insights.find(i => i.id === primaryId);
+    const duplicates = project.insights.filter(i => duplicateIds.includes(i.id));
+    
+    if (!primary) throw new Error("Primary insight not found");
+
+    // Merge supporting sources from duplicates
+    const allSources: SourceReference[] = [...(primary.supportingSources || [])];
+    for (const dup of duplicates) {
+        if (dup.supportingSources) {
+            allSources.push(...dup.supportingSources);
+        }
+        // Also add the duplicate's main source as a supporting source
+        allSources.push({
+            sourceId: dup.id,
+            sourceName: dup.source,
+            sourceType: dup.sourceType,
+            snippet: dup.detail,
+            timestamp: dup.timestamp
+        });
+    }
+
+    // Merge stakeholder mentions
+    const allStakeholders = new Set([
+        ...(primary.stakeholderMentions || []),
+        ...duplicates.flatMap(d => d.stakeholderMentions || [])
+    ]);
+
+    const updatedInsights = project.insights.map(insight => {
+        if (insight.id === primaryId) {
+            return {
+                ...insight,
+                supportingSources: allSources,
+                evidenceCount: allSources.length + 1,
+                mergedFromIds: [...(insight.mergedFromIds || []), ...duplicateIds],
+                stakeholderMentions: Array.from(allStakeholders),
+                // Boost confidence based on evidence
+                confidenceScore: Math.min(100, (insight.confidenceScore || 50) + duplicates.length * 15),
+                confidence: allSources.length >= 3 ? 'high' : allSources.length >= 1 ? 'medium' : 'low'
+            };
+        }
+        if (duplicateIds.includes(insight.id)) {
+            return { ...insight, isMerged: true, status: 'rejected' as const };
+        }
+        return insight;
+    });
+
+    const updatedProject: ProjectState = {
+        ...project,
+        insights: updatedInsights,
+        lastUpdated: new Date().toISOString()
+    };
+
+    return new Promise((resolve, reject) => {
+        const transaction = db.transaction(PROJECT_STORE, 'readwrite');
+        const store = transaction.objectStore(PROJECT_STORE);
+        const request = store.put(updatedProject);
+        request.onsuccess = () => resolve(updatedProject);
+        request.onerror = () => reject(request.error);
+    });
+};
+
+// Reorder insights by priority
+export const reorderInsightPriorities = async (insightIds: string[]): Promise<ProjectState> => {
+    const db = await initDB();
+    const project = await getProjectData();
+    if (!project) throw new Error("No project found");
+
+    const orderMap = new Map(insightIds.map((id, idx) => [id, idx]));
+    const updatedInsights = project.insights.map(insight => {
+        const order = orderMap.get(insight.id);
+        return order !== undefined ? { ...insight, priorityOrder: order } : insight;
+    });
+
+    const updatedProject: ProjectState = {
+        ...project,
+        insights: updatedInsights,
+        lastUpdated: new Date().toISOString()
+    };
+
+    return new Promise((resolve, reject) => {
+        const transaction = db.transaction(PROJECT_STORE, 'readwrite');
+        const store = transaction.objectStore(PROJECT_STORE);
+        const request = store.put(updatedProject);
+        request.onsuccess = () => resolve(updatedProject);
+        request.onerror = () => reject(request.error);
+    });
+};
+
 export const addSourceToProject = async (source: Source): Promise<ProjectState> => {
     const db = await initDB();
     const project = await getProjectData();
@@ -513,36 +790,6 @@ export const getProjectStats = (project: ProjectState | null) => {
             (project.status === 'Final' ? 15 : 0)
         )
     };
-};
-
-/**
- * Bulk update insights - useful for batch operations
- */
-export const bulkUpdateInsights = async (updates: { id: string; changes: Partial<Insight> }[]): Promise<ProjectState> => {
-    const db = await initDB();
-    const project = await getProjectData();
-    if (!project) throw new Error("No project found");
-
-    const updateMap = new Map(updates.map(u => [u.id, u.changes]));
-    
-    const updatedInsights = project.insights.map(insight => {
-        const changes = updateMap.get(insight.id);
-        return changes ? { ...insight, ...changes } : insight;
-    });
-
-    const updatedProject: ProjectState = {
-        ...project,
-        insights: updatedInsights,
-        lastUpdated: new Date().toISOString()
-    };
-
-    return new Promise((resolve, reject) => {
-        const transaction = db.transaction(PROJECT_STORE, 'readwrite');
-        const store = transaction.objectStore(PROJECT_STORE);
-        const request = store.put(updatedProject);
-        request.onsuccess = () => resolve(updatedProject);
-        request.onerror = () => reject(request.error);
-    });
 };
 
 /**

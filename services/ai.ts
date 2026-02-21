@@ -4,7 +4,7 @@ import { Task, Insight, BRDSection } from "../db";
 const ai = new GoogleGenAI({ apiKey: import.meta.env.VITE_GEMINI_API_KEY });
 
 // Use the cheapest, fastest model
-const modelId = "gemini-2.0-flash";
+const modelId = "gemini-2.5-flash";
 
 // ============================================================================
 // CACHING LAYER - Minimize API costs
@@ -1052,6 +1052,83 @@ export const chatWithClarityActions = async (
       message: "I'm having trouble connecting right now. Please try again in a moment.",
       confidence: 0,
       actions: []
+    };
+  }
+};
+
+// ============================================================================
+// REFINE INSIGHT WITH AI
+// ============================================================================
+
+export interface RefinedInsight {
+  summary: string;
+  detail: string;
+}
+
+export const refineInsight = async (
+  insight: Insight,
+  projectContext?: { name?: string; goals?: string }
+): Promise<RefinedInsight> => {
+  const cacheKey = getCacheKey('refineInsight', insight.summary, insight.detail);
+  const cached = getFromCache<RefinedInsight>(cacheKey);
+  if (cached) return cached;
+  
+  trackAPICall();
+  
+  try {
+    const prompt = `You are an expert Business Analyst AI. Your task is to refine and improve the following insight to make it clearer, more specific, and more actionable for a Business Requirements Document.
+
+Current Insight:
+- Summary: ${insight.summary}
+- Detail: ${insight.detail}
+- Category: ${insight.category}
+- Source: ${insight.source}
+${projectContext?.name ? `- Project: ${projectContext.name}` : ''}
+${projectContext?.goals ? `- Project Goals: ${projectContext.goals}` : ''}
+
+Refine this insight by:
+1. Making the summary more concise and action-oriented (max 100 chars)
+2. Expanding the detail with specific, measurable criteria where applicable
+3. Ensuring professional business language
+4. Preserving the original meaning and intent
+5. Adding quantifiable metrics or acceptance criteria if possible
+
+Return a JSON object with the refined summary and detail.`;
+
+    const response = await ai.models.generateContent({
+      model: modelId,
+      contents: prompt,
+      config: {
+        responseMimeType: "application/json",
+        responseSchema: {
+          type: Type.OBJECT,
+          properties: {
+            summary: { 
+              type: Type.STRING, 
+              description: "Refined summary - concise and action-oriented (max 100 chars)" 
+            },
+            detail: { 
+              type: Type.STRING, 
+              description: "Refined detail - specific, measurable, and professional" 
+            }
+          },
+          required: ['summary', 'detail']
+        }
+      }
+    });
+
+    const text = response.text;
+    if (!text) throw new Error("No response from AI");
+    
+    const refined = JSON.parse(text) as RefinedInsight;
+    setCache(cacheKey, refined);
+    return refined;
+  } catch (error) {
+    console.error("Refine insight failed:", error);
+    // Return original if refinement fails
+    return {
+      summary: insight.summary,
+      detail: insight.detail
     };
   }
 };

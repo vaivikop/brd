@@ -1,33 +1,31 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useCallback, memo } from 'react';
 import { 
   Lightbulb, 
   CheckCircle2, 
   Flag, 
-  Trash2, 
-  ChevronDown, 
-  ChevronUp, 
-  Filter, 
+  X, 
+  ChevronRight, 
   Search,
   AlertTriangle,
-  ExternalLink,
-  MessageSquare,
-  Mail,
-  Video,
   FileText,
-  Database,
+  Users,
   Clock,
   ArrowRight,
-  Info,
-  Link2,
-  RefreshCw,
-  Loader,
+  Sparkles,
   AlertCircle,
-  Upload
+  ThumbsUp,
+  ThumbsDown,
+  Eye,
+  Zap,
+  Target,
+  HelpCircle,
+  CheckCheck,
+  RotateCcw,
+  Keyboard
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import Button from './Button';
-import Tooltip from './Tooltip';
-import { ProjectState, Insight, updateInsightStatus, updateProjectContext, getProjectStats } from '../utils/db';
+import { ProjectState, Insight, updateInsightStatus, bulkUpdateInsightStatus, getProjectStats } from '../utils/db';
 import { SourceIcon, getSourceTypeColor } from '../utils/sourceIcons';
 
 interface InsightsReviewProps {
@@ -37,22 +35,19 @@ interface InsightsReviewProps {
   onNavigateToBRD?: () => void;
 }
 
+type CategoryTab = 'all' | 'requirement' | 'decision' | 'stakeholder' | 'timeline' | 'question';
+
 const InsightsReview: React.FC<InsightsReviewProps> = ({ project, onUpdate, onContinue, onNavigateToBRD }) => {
-  const [filterCategory, setFilterCategory] = useState<string>('all');
-  const [filterConfidence, setFilterConfidence] = useState<string>('all');
-  const [filterBRDStatus, setFilterBRDStatus] = useState<string>('all');
+  const [activeTab, setActiveTab] = useState<CategoryTab>('all');
   const [searchQuery, setSearchQuery] = useState('');
-  const [expandedId, setExpandedId] = useState<string | null>(null);
-  const [isLoadingInsights, setIsLoadingInsights] = useState(false);
+  const [focusedInsightId, setFocusedInsightId] = useState<string | null>(null);
   const [updatingInsightId, setUpdatingInsightId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-
-  // No longer seeding mock insights - insights come from real source analysis
-  // This ensures users only see data actually extracted from their sources
+  const [showOnlyPending, setShowOnlyPending] = useState(false);
+  const [justActioned, setJustActioned] = useState<{id: string, action: 'approved' | 'rejected' | 'flagged'} | null>(null);
 
   const [localInsights, setLocalInsights] = useState<Insight[]>([]);
 
-  // Sync local insights with project insights
   useEffect(() => {
     if (project.insights && project.insights.length > 0) {
       setLocalInsights(project.insights);
@@ -61,36 +56,66 @@ const InsightsReview: React.FC<InsightsReviewProps> = ({ project, onUpdate, onCo
     }
   }, [project.insights]);
 
-  // Compute project stats using the helper
   const projectStats = useMemo(() => getProjectStats(project), [project]);
+
+  // Category configuration with icons and colors
+  const categoryConfig = {
+    requirement: { icon: Target, label: 'Requirements', color: 'blue', description: 'What the system must do' },
+    decision: { icon: CheckCircle2, label: 'Decisions', color: 'emerald', description: 'Choices that were made' },
+    stakeholder: { icon: Users, label: 'Stakeholders', color: 'purple', description: 'People & their needs' },
+    timeline: { icon: Clock, label: 'Timelines', color: 'indigo', description: 'Dates & milestones' },
+    question: { icon: HelpCircle, label: 'Open Questions', color: 'amber', description: 'Needs clarification' },
+  };
+
+  const getCategoryColor = (category: string) => {
+    const colors: Record<string, string> = {
+      requirement: 'bg-blue-50 text-blue-600 border-blue-200',
+      decision: 'bg-emerald-50 text-emerald-600 border-emerald-200',
+      stakeholder: 'bg-purple-50 text-purple-600 border-purple-200',
+      timeline: 'bg-indigo-50 text-indigo-600 border-indigo-200',
+      question: 'bg-amber-50 text-amber-600 border-amber-200',
+    };
+    return colors[category] || 'bg-slate-50 text-slate-600 border-slate-200';
+  };
 
   const filteredInsights = useMemo(() => {
     return localInsights.filter(insight => {
-      const matchesCategory = filterCategory === 'all' || insight.category === filterCategory;
-      const matchesConfidence = filterConfidence === 'all' || insight.confidence === filterConfidence;
-      const matchesBRDStatus = filterBRDStatus === 'all' || 
-        (filterBRDStatus === 'in-brd' && insight.includedInBRD) ||
-        (filterBRDStatus === 'not-in-brd' && !insight.includedInBRD);
-      const matchesSearch = insight.summary.toLowerCase().includes(searchQuery.toLowerCase()) || 
-                           insight.detail.toLowerCase().includes(searchQuery.toLowerCase());
-      return matchesCategory && matchesConfidence && matchesBRDStatus && matchesSearch;
+      const matchesTab = activeTab === 'all' || insight.category === activeTab;
+      const matchesPending = !showOnlyPending || insight.status === 'pending';
+      const matchesSearch = !searchQuery || 
+        insight.summary.toLowerCase().includes(searchQuery.toLowerCase()) || 
+        insight.detail.toLowerCase().includes(searchQuery.toLowerCase());
+      return matchesTab && matchesPending && matchesSearch;
     });
-  }, [localInsights, filterCategory, filterConfidence, filterBRDStatus, searchQuery]);
+  }, [localInsights, activeTab, showOnlyPending, searchQuery]);
 
-  const handleStatusChange = async (id: string, status: Insight['status']) => {
+  // Group insights by status for smarter display
+  const groupedInsights = useMemo(() => {
+    const pending = filteredInsights.filter(i => i.status === 'pending');
+    const approved = filteredInsights.filter(i => i.status === 'approved');
+    const flagged = filteredInsights.filter(i => i.status === 'flagged');
+    const rejected = filteredInsights.filter(i => i.status === 'rejected');
+    return { pending, approved, flagged, rejected };
+  }, [filteredInsights]);
+
+  const handleStatusChange = useCallback(async (id: string, status: Insight['status']) => {
     setUpdatingInsightId(id);
     setError(null);
     
-    // Update local state immediately for responsiveness
+    // Optimistic update - instant UI feedback
     setLocalInsights(prev => prev.map(ins => ins.id === id ? { ...ins, status } : ins));
+    
+    // Show action feedback
+    setJustActioned({ id, action: status as 'approved' | 'rejected' | 'flagged' });
+    setTimeout(() => setJustActioned(null), 1000);
     
     try {
       const updated = await updateInsightStatus(id, status);
       onUpdate(updated);
     } catch (err) {
       console.error("Failed to update status in DB", err);
-      setError("Failed to update insight status. Please try again.");
-      // Revert the local change on error
+      setError("Couldn't save. Please try again.");
+      // Rollback on error
       setLocalInsights(prev => prev.map(ins => {
         const original = project.insights.find(i => i.id === id);
         return ins.id === id && original ? { ...ins, status: original.status } : ins;
@@ -98,81 +123,124 @@ const InsightsReview: React.FC<InsightsReviewProps> = ({ project, onUpdate, onCo
     } finally {
       setUpdatingInsightId(null);
     }
-  };
+  }, [project.insights, onUpdate]);
 
-  const handleBulkApprove = async () => {
+  const handleBulkApprove = useCallback(async () => {
     const pendingInsights = localInsights.filter(i => i.status === 'pending');
     if (pendingInsights.length === 0) return;
     
-    setIsLoadingInsights(true);
+    setUpdatingInsightId('bulk');
     setError(null);
     
     try {
-      // Update all pending to approved
-      for (const insight of pendingInsights) {
-        await updateInsightStatus(insight.id, 'approved');
-      }
-      // Refresh from project
+      // Single DB transaction for all updates - much faster!
+      const updates = pendingInsights.map(i => ({ insightId: i.id, status: 'approved' as const }));
+      const updatedProject = await bulkUpdateInsightStatus(updates);
+      
+      // Update local state
       const updatedInsights = localInsights.map(i => 
         i.status === 'pending' ? { ...i, status: 'approved' as const } : i
       );
       setLocalInsights(updatedInsights);
+      
+      // Propagate to parent
+      onUpdate(updatedProject);
     } catch (err) {
       console.error("Failed to bulk approve", err);
-      setError("Failed to approve all insights. Please try again.");
+      setError("Couldn't approve all. Please try again.");
     } finally {
-      setIsLoadingInsights(false);
+      setUpdatingInsightId(null);
     }
-  };
+  }, [localInsights, onUpdate]);
 
-  const getCategoryIcon = (category: Insight['category']) => {
-    switch (category) {
-      case 'requirement': return <FileText className="h-4 w-4" />;
-      case 'decision': return <CheckCircle2 className="h-4 w-4" />;
-      case 'stakeholder': return <Database className="h-4 w-4" />;
-      case 'timeline': return <Clock className="h-4 w-4" />;
-      case 'question': return <AlertTriangle className="h-4 w-4" />;
-      default: return <Lightbulb className="h-4 w-4" />;
+  // Optimized stats - single pass through insights
+  const stats = useMemo(() => {
+    let approved = 0, pending = 0, flagged = 0, rejected = 0, inBRD = 0;
+    for (const i of localInsights) {
+      if (i.status === 'approved') approved++;
+      else if (i.status === 'pending') pending++;
+      else if (i.status === 'flagged') flagged++;
+      else if (i.status === 'rejected') rejected++;
+      if (i.includedInBRD) inBRD++;
     }
-  };
+    return { total: localInsights.length, approved, pending, flagged, rejected, inBRD };
+  }, [localInsights]);
 
-  const getSourceIcon = (type: Insight['sourceType']) => {
-    return <SourceIcon type={type} className="h-3.5 w-3.5" />;
-  };
-
-  const getConfidenceColor = (confidence: Insight['confidence']) => {
-    switch (confidence) {
-      case 'high': return 'text-emerald-600 bg-emerald-50 border-emerald-100';
-      case 'medium': return 'text-orange-600 bg-orange-50 border-orange-100';
-      case 'low': return 'text-red-600 bg-red-50 border-red-100';
-      default: return 'text-slate-600 bg-slate-50 border-slate-100';
-    }
-  };
-
-  const stats = {
-    total: localInsights.length,
-    approved: localInsights.filter(i => i.status === 'approved').length,
-    pending: localInsights.filter(i => i.status === 'pending').length,
-    flagged: localInsights.filter(i => i.status === 'flagged').length,
-    inBRD: localInsights.filter(i => i.includedInBRD).length,
-  };
-
-  // Check if BRD exists and show appropriate messaging
   const hasBRD = projectStats.hasBRD;
-  const brdNeedsUpdate = hasBRD && stats.approved > stats.inBRD;
+  const progressPercent = stats.total > 0 ? Math.round(((stats.approved + stats.rejected) / stats.total) * 100) : 0;
 
-  // Loading state
-  if (isLoadingInsights) {
+  // Count per category
+  const categoryCounts = useMemo(() => {
+    const counts: Record<string, number> = { all: localInsights.length };
+    localInsights.forEach(i => {
+      counts[i.category] = (counts[i.category] || 0) + 1;
+    });
+    return counts;
+  }, [localInsights]);
+
+  // Keyboard navigation for fast review
+  const [selectedIndex, setSelectedIndex] = useState(0);
+  
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      // Only handle keys when not typing in search
+      if (document.activeElement?.tagName === 'INPUT') return;
+      
+      const pendingInsights = filteredInsights.filter(i => i.status === 'pending');
+      const currentInsight = pendingInsights[selectedIndex];
+      
+      switch (e.key) {
+        case 'j': // Next
+        case 'ArrowDown':
+          e.preventDefault();
+          setSelectedIndex(prev => Math.min(prev + 1, pendingInsights.length - 1));
+          break;
+        case 'k': // Previous  
+        case 'ArrowUp':
+          e.preventDefault();
+          setSelectedIndex(prev => Math.max(prev - 1, 0));
+          break;
+        case 'a': // Approve
+          if (currentInsight) handleStatusChange(currentInsight.id, 'approved');
+          break;
+        case 'f': // Flag
+          if (currentInsight) handleStatusChange(currentInsight.id, 'flagged');
+          break;
+        case 'r': // Reject
+          if (currentInsight) handleStatusChange(currentInsight.id, 'rejected');
+          break;
+        case 'A': // Approve All (Shift+A)
+          if (e.shiftKey && stats.pending > 0) handleBulkApprove();
+          break;
+      }
+    };
+    
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [filteredInsights, selectedIndex, handleStatusChange, handleBulkApprove, stats.pending]);
+
+  // Empty state
+  if (localInsights.length === 0) {
     return (
-      <div className="max-w-6xl mx-auto pb-20 animate-in fade-in duration-500">
-        <div className="flex flex-col items-center justify-center h-[60vh] gap-6">
-          <div className="relative">
-            <div className="w-16 h-16 border-4 border-blue-100 border-t-blue-600 rounded-full animate-spin"></div>
-            <Lightbulb className="absolute inset-0 m-auto h-6 w-6 text-blue-600" />
+      <div className="max-w-4xl mx-auto pb-20 animate-in fade-in duration-500">
+        <div className="flex flex-col items-center justify-center min-h-[60vh] text-center px-4">
+          <div className="w-24 h-24 bg-gradient-to-br from-blue-100 to-purple-100 rounded-3xl flex items-center justify-center mb-8">
+            <Lightbulb className="h-12 w-12 text-blue-500" />
           </div>
-          <div className="text-center">
-            <h3 className="text-xl font-bold text-slate-800 mb-2">Analyzing Your Data...</h3>
-            <p className="text-slate-500">Extracting insights from connected sources</p>
+          <h2 className="text-3xl font-bold text-slate-900 mb-4">No Insights Yet</h2>
+          <p className="text-lg text-slate-500 max-w-md mb-8 leading-relaxed">
+            Connect your data sources first. I'll analyze meetings, emails, and documents to extract key requirements automatically.
+          </p>
+          <div className="flex items-center gap-3 text-sm text-slate-400">
+            <span className="flex items-center gap-2 px-3 py-1.5 bg-slate-50 rounded-full">
+              <FileText className="h-4 w-4" /> Documents
+            </span>
+            <span className="flex items-center gap-2 px-3 py-1.5 bg-slate-50 rounded-full">
+              <Users className="h-4 w-4" /> Meetings
+            </span>
+            <span className="flex items-center gap-2 px-3 py-1.5 bg-slate-50 rounded-full">
+              <Sparkles className="h-4 w-4" /> Emails
+            </span>
           </div>
         </div>
       </div>
@@ -180,7 +248,7 @@ const InsightsReview: React.FC<InsightsReviewProps> = ({ project, onUpdate, onCo
   }
 
   return (
-    <div className="max-w-6xl mx-auto pb-20 animate-in fade-in slide-in-from-bottom-4 duration-500">
+    <div className="max-w-5xl mx-auto pb-20 animate-in fade-in duration-500">
       {/* Error Toast */}
       <AnimatePresence>
         {error && (
@@ -188,378 +256,410 @@ const InsightsReview: React.FC<InsightsReviewProps> = ({ project, onUpdate, onCo
             initial={{ opacity: 0, y: -20 }}
             animate={{ opacity: 1, y: 0 }}
             exit={{ opacity: 0, y: -20 }}
-            className="fixed top-6 right-6 z-50 bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded-xl flex items-center gap-3 shadow-lg"
+            className="fixed top-6 left-1/2 -translate-x-1/2 z-50 bg-red-500 text-white px-5 py-3 rounded-2xl flex items-center gap-3 shadow-xl"
           >
             <AlertCircle className="h-5 w-5" />
             <span className="text-sm font-medium">{error}</span>
-            <button onClick={() => setError(null)} className="p-1 hover:bg-red-100 rounded">
-              <Trash2 className="h-4 w-4" />
+            <button onClick={() => setError(null)} className="p-1 hover:bg-red-400 rounded-lg ml-2">
+              <X className="h-4 w-4" />
             </button>
           </motion.div>
         )}
       </AnimatePresence>
 
-      {/* Header */}
-      <header className="mb-6 lg:mb-10 flex flex-col gap-4 lg:gap-6">
-        <div className="max-w-2xl">
-          <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-blue-50 text-blue-700 text-xs font-bold uppercase tracking-wider mb-3 lg:mb-4 border border-blue-100">
-            <Lightbulb className="h-3.5 w-3.5" /> Step 4: Intelligence Review
+      {/* Action Feedback Toast */}
+      <AnimatePresence>
+        {justActioned && (
+          <motion.div
+            initial={{ opacity: 0, scale: 0.9, y: 20 }}
+            animate={{ opacity: 1, scale: 1, y: 0 }}
+            exit={{ opacity: 0, scale: 0.9 }}
+            className={`fixed bottom-8 left-1/2 -translate-x-1/2 z-50 px-6 py-3 rounded-2xl flex items-center gap-3 shadow-xl ${
+              justActioned.action === 'approved' ? 'bg-emerald-500 text-white' :
+              justActioned.action === 'flagged' ? 'bg-amber-500 text-white' :
+              'bg-slate-700 text-white'
+            }`}
+          >
+            {justActioned.action === 'approved' && <ThumbsUp className="h-5 w-5" />}
+            {justActioned.action === 'flagged' && <Flag className="h-5 w-5" />}
+            {justActioned.action === 'rejected' && <ThumbsDown className="h-5 w-5" />}
+            <span className="font-medium capitalize">{justActioned.action}!</span>
+          </motion.div>
+        )}
+      </AnimatePresence>
+      {/* Header - Simple & Clean */}
+      <header className="mb-8">
+        <div className="flex flex-col lg:flex-row lg:items-end lg:justify-between gap-6 mb-8">
+          <div>
+            <div className="inline-flex items-center gap-2 px-3 py-1.5 rounded-full bg-gradient-to-r from-blue-50 to-purple-50 text-blue-700 text-xs font-bold mb-4">
+              <Sparkles className="h-3.5 w-3.5" /> Review & Validate
+            </div>
+            <h1 className="text-3xl lg:text-4xl font-bold text-slate-900 mb-2">
+              {stats.pending > 0 ? `${stats.pending} insights need your review` : 'All insights reviewed!'}
+            </h1>
+            <p className="text-slate-500 text-lg">
+              {stats.pending > 0 
+                ? "Approve what's accurate, flag what needs discussion."
+                : `${stats.approved} approved and ready for your BRD.`
+              }
+            </p>
           </div>
-          <h1 className="text-2xl sm:text-3xl lg:text-4xl font-bold text-slate-900 mb-3 lg:mb-4 tracking-tight">Extracted Insights</h1>
-          <p className="text-base lg:text-lg text-slate-600 leading-relaxed">
-            I've analyzed your data sources and identified these key elements. Review and validate them to ensure your 
-            <span className="text-blue-600 font-semibold"> BRD is built on verified truth</span>.
-          </p>
+
+          {/* Progress Ring */}
+          <div className="flex items-center gap-6">
+            <div className="relative w-20 h-20">
+              <svg className="w-20 h-20 transform -rotate-90">
+                <circle
+                  className="text-slate-100"
+                  strokeWidth="6"
+                  stroke="currentColor"
+                  fill="transparent"
+                  r="34"
+                  cx="40"
+                  cy="40"
+                />
+                <circle
+                  className="text-emerald-500 transition-all duration-1000 ease-out"
+                  strokeWidth="6"
+                  strokeDasharray={34 * 2 * Math.PI}
+                  strokeDashoffset={34 * 2 * Math.PI * (1 - progressPercent / 100)}
+                  strokeLinecap="round"
+                  stroke="currentColor"
+                  fill="transparent"
+                  r="34"
+                  cx="40"
+                  cy="40"
+                />
+              </svg>
+              <div className="absolute inset-0 flex items-center justify-center">
+                <span className="text-xl font-bold text-slate-900">{progressPercent}%</span>
+              </div>
+            </div>
+            <div className="text-sm">
+              <div className="flex items-center gap-2 text-emerald-600 font-semibold mb-1">
+                <CheckCircle2 className="h-4 w-4" /> {stats.approved} approved
+              </div>
+              {stats.flagged > 0 && (
+                <div className="flex items-center gap-2 text-amber-600 font-medium mb-1">
+                  <Flag className="h-4 w-4" /> {stats.flagged} flagged
+                </div>
+              )}
+              <div className="flex items-center gap-2 text-slate-400">
+                <Eye className="h-4 w-4" /> {stats.pending} pending
+              </div>
+            </div>
+          </div>
         </div>
 
-        <div className="flex flex-col gap-3">
-          {/* Main Stats Card */}
-          <div className="bg-white px-4 lg:px-6 py-3 lg:py-4 rounded-xl lg:rounded-2xl border border-slate-200 shadow-sm flex items-center gap-4 lg:gap-6">
-              <div className="text-center">
-                  <div className="text-xl lg:text-2xl font-bold text-slate-900">{stats.approved}/{stats.total}</div>
-                  <div className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Validated</div>
-              </div>
-              <div className="h-6 lg:h-8 w-px bg-slate-100"></div>
-              <div className="flex-1 min-w-[100px] lg:min-w-[120px]">
-                  <div className="flex justify-between text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-1.5">
-                      <span>Progress</span>
-                      <span>{stats.total > 0 ? Math.round((stats.approved / stats.total) * 100) : 0}%</span>
-                  </div>
-                  <div className="h-2 w-full bg-slate-100 rounded-full overflow-hidden">
-                      <div 
-                          className="h-full bg-blue-500 transition-all duration-1000 ease-out" 
-                          style={{ width: `${stats.total > 0 ? (stats.approved / stats.total) * 100 : 0}%` }}
-                      ></div>
-                  </div>
-              </div>
+        {/* Category Tabs - Clean Pills */}
+        <div className="flex flex-wrap items-center gap-2 mb-6">
+          <button
+            onClick={() => setActiveTab('all')}
+            className={`px-4 py-2 rounded-xl text-sm font-medium transition-all ${
+              activeTab === 'all'
+                ? 'bg-slate-900 text-white shadow-lg'
+                : 'bg-white text-slate-600 border border-slate-200 hover:border-slate-300'
+            }`}
+          >
+            All <span className="ml-1 opacity-60">{categoryCounts.all || 0}</span>
+          </button>
+          {Object.entries(categoryConfig).map(([key, config]) => {
+            const Icon = config.icon;
+            const count = categoryCounts[key] || 0;
+            if (count === 0) return null;
+            return (
+              <button
+                key={key}
+                onClick={() => setActiveTab(key as CategoryTab)}
+                className={`px-4 py-2 rounded-xl text-sm font-medium transition-all flex items-center gap-2 ${
+                  activeTab === key
+                    ? `${getCategoryColor(key)} border shadow-sm`
+                    : 'bg-white text-slate-600 border border-slate-200 hover:border-slate-300'
+                }`}
+              >
+                <Icon className="h-4 w-4" />
+                {config.label}
+                <span className="opacity-60">{count}</span>
+              </button>
+            );
+          })}
+        </div>
+
+        {/* Quick Actions Bar */}
+        <div className="flex flex-wrap items-center gap-3">
+          {/* Search */}
+          <div className="relative flex-1 min-w-[200px] max-w-md">
+            <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-slate-400" />
+            <input 
+              type="text"
+              placeholder="Search insights..."
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              className="w-full pl-10 pr-4 py-2.5 bg-white border border-slate-200 rounded-xl text-sm focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none transition-all"
+            />
           </div>
 
-          {/* BRD Status Card */}
-          {hasBRD && (
-            <motion.div 
-              initial={{ opacity: 0, scale: 0.95 }}
-              animate={{ opacity: 1, scale: 1 }}
-              className={`px-4 py-3 rounded-xl border flex items-center gap-3 ${
-                brdNeedsUpdate 
-                  ? 'bg-amber-50 border-amber-200 text-amber-700' 
-                  : 'bg-emerald-50 border-emerald-200 text-emerald-700'
-              }`}
+          {/* Toggle Pending Only */}
+          <button
+            onClick={() => setShowOnlyPending(!showOnlyPending)}
+            className={`px-4 py-2.5 rounded-xl text-sm font-medium transition-all flex items-center gap-2 ${
+              showOnlyPending 
+                ? 'bg-blue-500 text-white shadow-lg shadow-blue-200' 
+                : 'bg-white text-slate-600 border border-slate-200 hover:bg-slate-50'
+            }`}
+          >
+            <Eye className="h-4 w-4" />
+            {showOnlyPending ? 'Showing Pending' : 'Show Pending Only'}
+          </button>
+
+          {/* Bulk Approve */}
+          {stats.pending > 0 && (
+            <button
+              onClick={handleBulkApprove}
+              disabled={updatingInsightId === 'bulk'}
+              className="px-5 py-2.5 bg-emerald-500 text-white rounded-xl text-sm font-semibold shadow-lg shadow-emerald-200 hover:bg-emerald-600 transition-all flex items-center gap-2 disabled:opacity-50"
             >
-              {brdNeedsUpdate ? (
-                <>
-                  <RefreshCw className="h-4 w-4" />
-                  <span className="text-xs font-bold">
-                    {stats.approved - stats.inBRD} new approved insights not in BRD
-                  </span>
-                  {onNavigateToBRD && (
-                    <button 
-                      onClick={onNavigateToBRD}
-                      className="ml-auto text-[10px] font-bold bg-amber-200 px-2 py-1 rounded-lg hover:bg-amber-300 transition-colors"
-                    >
-                      Regenerate BRD
-                    </button>
-                  )}
-                </>
+              {updatingInsightId === 'bulk' ? (
+                <div className="h-4 w-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
               ) : (
-                <>
-                  <Link2 className="h-4 w-4" />
-                  <span className="text-xs font-bold">{stats.inBRD} insights linked to BRD v{projectStats.brdVersion}</span>
-                  {onNavigateToBRD && (
-                    <button 
-                      onClick={onNavigateToBRD}
-                      className="ml-auto text-[10px] font-bold bg-emerald-200 px-2 py-1 rounded-lg hover:bg-emerald-300 transition-colors"
-                    >
-                      View BRD
-                    </button>
-                  )}
-                </>
+                <CheckCheck className="h-4 w-4" />
               )}
-            </motion.div>
+              Approve All {stats.pending}
+            </button>
           )}
+
+          {/* Keyboard Shortcuts Hint */}
+          <div className="hidden lg:flex items-center gap-2 text-xs text-slate-400 ml-auto">
+            <Keyboard className="h-3.5 w-3.5" />
+            <span className="px-1.5 py-0.5 bg-slate-100 rounded font-mono">A</span> approve
+            <span className="px-1.5 py-0.5 bg-slate-100 rounded font-mono">F</span> flag
+            <span className="px-1.5 py-0.5 bg-slate-100 rounded font-mono">R</span> reject
+            <span className="px-1.5 py-0.5 bg-slate-100 rounded font-mono">↑↓</span> navigate
+          </div>
         </div>
       </header>
 
-      {/* Filters & Search */}
-      <div className="bg-white p-3 lg:p-4 rounded-xl lg:rounded-2xl border border-slate-200 shadow-sm mb-6 lg:mb-8 space-y-3 lg:space-y-0 lg:flex lg:flex-wrap lg:items-center lg:gap-4">
-        <div className="relative flex-1 min-w-0 lg:min-w-[200px]">
-          <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-slate-400" />
-          <input 
-            type="text"
-            placeholder="Search insights..."
-            value={searchQuery}
-            onChange={(e) => setSearchQuery(e.target.value)}
-            className="w-full pl-10 pr-4 py-2.5 bg-slate-50 border border-slate-100 rounded-xl text-sm focus:ring-2 focus:ring-blue-500 outline-none transition-all"
-          />
-        </div>
-        
-        <div className="flex flex-wrap items-center gap-2">
-          <Filter className="h-4 w-4 text-slate-400 hidden lg:block" />
-          <select 
-            value={filterCategory}
-            onChange={(e) => setFilterCategory(e.target.value)}
-            className="flex-1 sm:flex-none bg-slate-50 border border-slate-100 rounded-xl px-3 py-2 text-sm font-medium outline-none focus:ring-2 focus:ring-blue-500"
-          >
-            <option value="all">All Categories</option>
-            <option value="requirement">Requirements</option>
-            <option value="decision">Decisions</option>
-            <option value="stakeholder">Stakeholders</option>
-            <option value="timeline">Timelines</option>
-            <option value="question">Open Questions</option>
-          </select>
-          
-          <select 
-            value={filterConfidence}
-            onChange={(e) => setFilterConfidence(e.target.value)}
-            className="flex-1 sm:flex-none bg-slate-50 border border-slate-100 rounded-xl px-3 py-2 text-sm font-medium outline-none focus:ring-2 focus:ring-blue-500"
-          >
-            <option value="all">All Confidence</option>
-            <option value="high">High</option>
-            <option value="medium">Medium</option>
-            <option value="low">Low</option>
-          </select>
-
-          {hasBRD && (
-            <select 
-              value={filterBRDStatus}
-              onChange={(e) => setFilterBRDStatus(e.target.value)}
-              className="flex-1 sm:flex-none bg-slate-50 border border-slate-100 rounded-xl px-3 py-2 text-sm font-medium outline-none focus:ring-2 focus:ring-blue-500"
-            >
-              <option value="all">All BRD Status</option>
-              <option value="in-brd">In BRD</option>
-              <option value="not-in-brd">Not in BRD</option>
-            </select>
-          )}
-        </div>
-
-        {stats.pending > 0 && (
-          <Button 
-            variant="outline" 
-            onClick={handleBulkApprove}
-            disabled={isLoadingInsights}
-            className="w-full lg:w-auto lg:ml-auto rounded-xl border-emerald-200 text-emerald-600 hover:bg-emerald-50 justify-center"
-          >
-            {isLoadingInsights ? (
-              <Loader className="h-4 w-4 animate-spin mr-2" />
-            ) : (
-              <CheckCircle2 className="h-4 w-4 mr-2" />
-            )}
-            Approve All ({stats.pending})
-          </Button>
-        )}
-      </div>
-
-      {/* Insights List */}
-      <div className="space-y-4 mb-12">
+      {/* Insights Grid - Clean Cards */}
+      <div className="space-y-3 mb-12">
         <AnimatePresence mode="popLayout">
-          {filteredInsights.map((insight) => (
-            <motion.div 
-              key={insight.id}
-              layout
-              initial={{ opacity: 0, y: 20 }}
-              animate={{ opacity: 1, y: 0 }}
-              exit={{ opacity: 0, scale: 0.95 }}
-              className={`bg-white rounded-3xl border transition-all duration-300 ${
-                updatingInsightId === insight.id ? 'ring-2 ring-blue-300 border-blue-200' :
-                insight.status === 'approved' ? 'border-emerald-100 shadow-sm' : 
-                insight.status === 'flagged' ? 'border-orange-100 shadow-md' :
-                insight.status === 'rejected' ? 'border-slate-100 opacity-60' :
-                'border-slate-100 shadow-sm hover:shadow-md'
-              }`}
-            >
-              <div className="p-6">
-                <div className="flex items-start justify-between gap-6">
-                  <div className="flex items-start gap-5 flex-1">
-                    <div className={`mt-1 p-3 rounded-2xl ${
-                      insight.category === 'requirement' ? 'bg-blue-50 text-blue-600' :
-                      insight.category === 'decision' ? 'bg-emerald-50 text-emerald-600' :
-                      insight.category === 'stakeholder' ? 'bg-purple-50 text-purple-600' :
-                      insight.category === 'timeline' ? 'bg-indigo-50 text-indigo-600' :
-                      'bg-orange-50 text-orange-600'
-                    }`}>
-                      {getCategoryIcon(insight.category)}
+          {filteredInsights.map((insight) => {
+            const config = categoryConfig[insight.category as keyof typeof categoryConfig] || categoryConfig.question;
+            const CategoryIcon = config.icon;
+            const isExpanded = focusedInsightId === insight.id;
+            
+            return (
+              <motion.div 
+                key={insight.id}
+                layout
+                initial={{ opacity: 0, y: 10 }}
+                animate={{ opacity: 1, y: 0 }}
+                exit={{ opacity: 0, x: -20 }}
+                className={`group bg-white rounded-2xl border transition-all duration-200 overflow-hidden ${
+                  updatingInsightId === insight.id ? 'ring-2 ring-blue-400 border-blue-200' :
+                  insight.status === 'approved' ? 'border-emerald-200 bg-emerald-50/30' : 
+                  insight.status === 'flagged' ? 'border-amber-200 bg-amber-50/30' :
+                  insight.status === 'rejected' ? 'border-slate-200 opacity-50' :
+                  'border-slate-200 hover:border-slate-300 hover:shadow-md'
+                }`}
+              >
+                <div className="p-5">
+                  <div className="flex items-start gap-4">
+                    {/* Category Icon */}
+                    <div className={`p-2.5 rounded-xl ${getCategoryColor(insight.category)}`}>
+                      <CategoryIcon className="h-5 w-5" />
                     </div>
                     
-                    <div className="flex-1">
-                      <div className="flex items-center gap-3 mb-1 flex-wrap">
-                        <h3 className="text-lg font-bold text-slate-900">{insight.summary}</h3>
-                        <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wider border ${getConfidenceColor(insight.confidence)}`}>
-                          {insight.confidence} Confidence
-                        </span>
-                        {insight.includedInBRD && (
-                          <span className="px-2 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wider border bg-blue-50 text-blue-600 border-blue-100 flex items-center gap-1">
-                            <Link2 className="h-3 w-3" /> In BRD
-                          </span>
-                        )}
-                      </div>
-                      
-                      <div className="flex items-center gap-4 text-xs font-bold text-slate-400 uppercase tracking-widest">
-                        <span className="flex items-center gap-1.5">
-                          {getSourceIcon(insight.sourceType)} {insight.source}
-                        </span>
-                        <span className="w-1 h-1 rounded-full bg-slate-200"></span>
-                        <span className="flex items-center gap-1.5">
-                          <Clock className="h-3.5 w-3.5" /> {new Date(insight.timestamp).toLocaleDateString()}
-                        </span>
-                        {insight.brdSections && insight.brdSections.length > 0 && (
-                          <>
-                            <span className="w-1 h-1 rounded-full bg-slate-200"></span>
-                            <span className="flex items-center gap-1.5 text-blue-500 normal-case font-medium">
-                              <FileText className="h-3.5 w-3.5" /> {insight.brdSections.join(', ')}
+                    {/* Content */}
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-start justify-between gap-4 mb-2">
+                        <div className="flex-1">
+                          <h3 className="text-base font-semibold text-slate-900 leading-snug mb-1">
+                            {insight.summary}
+                          </h3>
+                          <div className="flex flex-wrap items-center gap-2 text-xs text-slate-500">
+                            <span className="flex items-center gap-1">
+                              <SourceIcon type={insight.sourceType} className="h-3.5 w-3.5" />
+                              {insight.source}
                             </span>
-                          </>
-                        )}
-                      </div>
-                    </div>
-                  </div>
-
-                  <div className="flex items-center gap-2">
-                    {updatingInsightId === insight.id ? (
-                      <div className="p-2.5 rounded-xl bg-blue-50">
-                        <Loader className="h-5 w-5 text-blue-500 animate-spin" />
-                      </div>
-                    ) : (
-                      <>
-                        <Tooltip content="Approve">
-                          <button 
-                            onClick={() => handleStatusChange(insight.id, 'approved')}
-                            className={`p-2.5 rounded-xl transition-all ${insight.status === 'approved' ? 'bg-emerald-500 text-white shadow-lg shadow-emerald-200' : 'bg-slate-50 text-slate-400 hover:bg-emerald-50 hover:text-emerald-600'}`}
-                          >
-                            <CheckCircle2 className="h-5 w-5" />
-                          </button>
-                        </Tooltip>
-                        <Tooltip content="Flag for Review">
-                          <button 
-                            onClick={() => handleStatusChange(insight.id, 'flagged')}
-                            className={`p-2.5 rounded-xl transition-all ${insight.status === 'flagged' ? 'bg-orange-500 text-white shadow-lg shadow-orange-200' : 'bg-slate-50 text-slate-400 hover:bg-orange-50 hover:text-orange-600'}`}
-                          >
-                            <Flag className="h-5 w-5" />
-                          </button>
-                        </Tooltip>
-                        <Tooltip content="Reject">
-                          <button 
-                            onClick={() => handleStatusChange(insight.id, 'rejected')}
-                            className={`p-2.5 rounded-xl transition-all ${insight.status === 'rejected' ? 'bg-slate-900 text-white shadow-lg shadow-slate-400' : 'bg-slate-50 text-slate-400 hover:bg-red-50 hover:text-red-600'}`}
-                          >
-                            <Trash2 className="h-5 w-5" />
-                          </button>
-                        </Tooltip>
-                      </>
-                    )}
-                    <button 
-                      onClick={() => setExpandedId(expandedId === insight.id ? null : insight.id)}
-                      className="p-2.5 bg-slate-50 text-slate-400 rounded-xl hover:bg-slate-100 transition-all ml-2"
-                    >
-                      {expandedId === insight.id ? <ChevronUp className="h-5 w-5" /> : <ChevronDown className="h-5 w-5" />}
-                    </button>
-                  </div>
-                </div>
-
-                <AnimatePresence>
-                  {expandedId === insight.id && (
-                    <motion.div 
-                      initial={{ height: 0, opacity: 0 }}
-                      animate={{ height: 'auto', opacity: 1 }}
-                      exit={{ height: 0, opacity: 0 }}
-                      className="overflow-hidden"
-                    >
-                      <div className="mt-6 pt-6 border-t border-slate-50">
-                        <div className="flex gap-6">
-                          <div className="flex-1">
-                            <h4 className="text-xs font-bold text-slate-400 uppercase tracking-widest mb-3">Supporting Detail</h4>
-                            <p className="text-slate-600 leading-relaxed bg-slate-50 p-4 rounded-2xl border border-slate-100">
-                              {insight.detail}
-                            </p>
+                            <span className="text-slate-300">•</span>
+                            <span className={`px-2 py-0.5 rounded-full text-[10px] font-semibold uppercase ${
+                              insight.confidence === 'high' ? 'bg-emerald-100 text-emerald-700' :
+                              insight.confidence === 'medium' ? 'bg-amber-100 text-amber-700' :
+                              'bg-red-100 text-red-700'
+                            }`}>
+                              {insight.confidence}
+                            </span>
+                            {insight.includedInBRD && (
+                              <>
+                                <span className="text-slate-300">•</span>
+                                <span className="flex items-center gap-1 text-blue-600 font-medium">
+                                  <FileText className="h-3 w-3" /> In BRD
+                                </span>
+                              </>
+                            )}
                           </div>
-                          <div className="w-64">
-                            <h4 className="text-xs font-bold text-slate-400 uppercase tracking-widest mb-3">Traceability</h4>
-                            <div className="space-y-3">
-                              <div className={`p-3 border rounded-xl shadow-sm flex items-center gap-3 ${getSourceTypeColor(insight.sourceType)}`}>
-                                <div className="p-2 bg-white/50 rounded-lg">
-                                  {getSourceIcon(insight.sourceType)}
-                                </div>
-                                <div className="flex-1 min-w-0">
-                                  <div className="text-xs font-bold truncate">{insight.source}</div>
-                                  <div className="text-[10px] opacity-75 font-medium capitalize">{insight.sourceType} Source</div>
-                                </div>
-                              </div>
+                        </div>
+
+                        {/* Action Buttons - Clean & Simple */}
+                        <div className="flex items-center gap-1.5">
+                          {updatingInsightId === insight.id ? (
+                            <div className="p-2 rounded-lg bg-slate-100">
+                              <div className="h-5 w-5 border-2 border-blue-500 border-t-transparent rounded-full animate-spin" />
+                            </div>
+                          ) : (
+                            <>
+                              <button 
+                                onClick={() => handleStatusChange(insight.id, 'approved')}
+                                className={`p-2 rounded-lg transition-all ${
+                                  insight.status === 'approved' 
+                                    ? 'bg-emerald-500 text-white shadow-md' 
+                                    : 'bg-slate-100 text-slate-400 hover:bg-emerald-100 hover:text-emerald-600'
+                                }`}
+                                title="Approve"
+                              >
+                                <ThumbsUp className="h-4 w-4" />
+                              </button>
+                              <button 
+                                onClick={() => handleStatusChange(insight.id, 'flagged')}
+                                className={`p-2 rounded-lg transition-all ${
+                                  insight.status === 'flagged' 
+                                    ? 'bg-amber-500 text-white shadow-md' 
+                                    : 'bg-slate-100 text-slate-400 hover:bg-amber-100 hover:text-amber-600'
+                                }`}
+                                title="Flag for discussion"
+                              >
+                                <Flag className="h-4 w-4" />
+                              </button>
+                              <button 
+                                onClick={() => handleStatusChange(insight.id, 'rejected')}
+                                className={`p-2 rounded-lg transition-all ${
+                                  insight.status === 'rejected' 
+                                    ? 'bg-slate-700 text-white shadow-md' 
+                                    : 'bg-slate-100 text-slate-400 hover:bg-red-100 hover:text-red-600'
+                                }`}
+                                title="Not relevant"
+                              >
+                                <X className="h-4 w-4" />
+                              </button>
+                              <button 
+                                onClick={() => setFocusedInsightId(isExpanded ? null : insight.id)}
+                                className="p-2 rounded-lg bg-slate-100 text-slate-400 hover:bg-slate-200 hover:text-slate-600 transition-all ml-1"
+                                title="See details"
+                              >
+                                <ChevronRight className={`h-4 w-4 transition-transform ${isExpanded ? 'rotate-90' : ''}`} />
+                              </button>
+                            </>
+                          )}
+                        </div>
+                      </div>
+
+                      {/* Expanded Details */}
+                      <AnimatePresence>
+                        {isExpanded && (
+                          <motion.div 
+                            initial={{ height: 0, opacity: 0 }}
+                            animate={{ height: 'auto', opacity: 1 }}
+                            exit={{ height: 0, opacity: 0 }}
+                            className="overflow-hidden"
+                          >
+                            <div className="mt-4 pt-4 border-t border-slate-100">
+                              <p className="text-slate-600 text-sm leading-relaxed bg-slate-50 p-4 rounded-xl">
+                                {insight.detail}
+                              </p>
                               {insight.confidence === 'low' && (
-                                <div className="p-3 bg-red-50 border border-red-100 rounded-xl flex items-start gap-3">
-                                  <AlertTriangle className="h-4 w-4 text-red-500 mt-0.5" />
-                                  <div className="text-[10px] text-red-700 font-bold leading-tight">
-                                    Low confidence due to conflicting statements in other sources.
-                                  </div>
+                                <div className="mt-3 flex items-start gap-2 p-3 bg-red-50 rounded-xl text-red-700 text-sm">
+                                  <AlertTriangle className="h-4 w-4 mt-0.5 flex-shrink-0" />
+                                  <span>Low confidence - may have conflicting information in other sources. Review carefully.</span>
                                 </div>
                               )}
                               {insight.brdSections && insight.brdSections.length > 0 && (
-                                <div className="p-3 bg-blue-50 border border-blue-100 rounded-xl flex items-start gap-3">
-                                  <FileText className="h-4 w-4 text-blue-500 mt-0.5" />
-                                  <div className="text-[10px] text-blue-700 font-bold leading-tight">
-                                    Used in BRD: {insight.brdSections.join(', ')}
-                                  </div>
+                                <div className="mt-3 flex items-center gap-2 text-sm text-blue-600">
+                                  <FileText className="h-4 w-4" />
+                                  <span>Used in: {insight.brdSections.join(', ')}</span>
                                 </div>
                               )}
                             </div>
-                          </div>
-                        </div>
-                      </div>
-                    </motion.div>
-                  )}
-                </AnimatePresence>
-              </div>
-            </motion.div>
-          ))}
+                          </motion.div>
+                        )}
+                      </AnimatePresence>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Quick Status Indicator */}
+                {insight.status !== 'pending' && (
+                  <div className={`px-5 py-2 text-xs font-medium flex items-center gap-2 ${
+                    insight.status === 'approved' ? 'bg-emerald-100 text-emerald-700' :
+                    insight.status === 'flagged' ? 'bg-amber-100 text-amber-700' :
+                    'bg-slate-100 text-slate-500'
+                  }`}>
+                    {insight.status === 'approved' && <><CheckCircle2 className="h-3.5 w-3.5" /> Approved - will be included in BRD</>}
+                    {insight.status === 'flagged' && <><Flag className="h-3.5 w-3.5" /> Flagged - needs team discussion</>}
+                    {insight.status === 'rejected' && <><X className="h-3.5 w-3.5" /> Not relevant - excluded from BRD</>}
+                    <button 
+                      onClick={() => handleStatusChange(insight.id, 'pending')}
+                      className="ml-auto flex items-center gap-1 hover:underline"
+                    >
+                      <RotateCcw className="h-3 w-3" /> Undo
+                    </button>
+                  </div>
+                )}
+              </motion.div>
+            );
+          })}
         </AnimatePresence>
         
-        {filteredInsights.length === 0 && localInsights.length > 0 && (
-          <div className="py-20 text-center bg-white rounded-[2rem] border border-dashed border-slate-200">
-            <div className="w-16 h-16 bg-slate-50 rounded-full flex items-center justify-center mx-auto mb-6 text-slate-300">
-              <Search className="h-8 w-8" />
-            </div>
-            <h3 className="text-xl font-bold text-slate-900 mb-2">No insights found</h3>
-            <p className="text-slate-500">Try adjusting your filters or search query.</p>
-          </div>
-        )}
-
-        {localInsights.length === 0 && (
-          <div className="py-20 text-center bg-white rounded-[2rem] border border-dashed border-slate-200">
-            <div className="w-20 h-20 bg-blue-50 rounded-full flex items-center justify-center mx-auto mb-6 text-blue-400">
-              <Lightbulb className="h-10 w-10" />
-            </div>
-            <h3 className="text-2xl font-bold text-slate-900 mb-3">No Insights Yet</h3>
-            <p className="text-slate-500 max-w-md mx-auto mb-6">
-              Connect data sources and let me analyze them to extract requirements, decisions, and stakeholder feedback.
-            </p>
-            <p className="text-sm text-slate-400">
-              Go to <span className="font-semibold text-blue-600">Data Sources</span> to add meetings, emails, or documents.
-            </p>
+        {/* Empty state for filtered results */}
+        {filteredInsights.length === 0 && (
+          <div className="py-16 text-center bg-white rounded-2xl border border-dashed border-slate-200">
+            <Search className="h-10 w-10 text-slate-300 mx-auto mb-4" />
+            <h3 className="text-lg font-semibold text-slate-900 mb-1">No matching insights</h3>
+            <p className="text-slate-500 text-sm">Try adjusting your search or filters.</p>
+            <button 
+              onClick={() => { setSearchQuery(''); setActiveTab('all'); setShowOnlyPending(false); }}
+              className="mt-4 text-blue-600 text-sm font-medium hover:underline"
+            >
+              Clear all filters
+            </button>
           </div>
         )}
       </div>
 
-      {/* Footer Actions */}
-      <div className="flex flex-col items-center gap-6 pt-10 border-t border-slate-100">
-        <div className="flex items-center gap-3 text-sm font-medium text-slate-500">
-          <Info className="h-4 w-4 text-blue-500" />
-          {stats.approved < stats.total && stats.pending > 0 ? (
-            <span>Please review and approve the remaining <span className="font-bold text-slate-900">{stats.pending}</span> pending insights.</span>
-          ) : stats.approved === stats.total && stats.total > 0 ? (
-            <span className="text-emerald-600 font-bold">All insights have been reviewed and validated!</span>
-          ) : stats.total === 0 ? (
-            <span>No insights available yet. Connect data sources to extract insights.</span>
-          ) : (
-            <span>Review completed. {stats.approved} insights approved, {stats.flagged} flagged for review.</span>
-          )}
-        </div>
-        
-        <div className="flex items-center gap-4">
-          {hasBRD && brdNeedsUpdate && onNavigateToBRD && (
+      {/* Footer - Clean CTA */}
+      <div className="bg-gradient-to-r from-slate-50 to-blue-50 rounded-2xl p-8 text-center">
+        {stats.pending > 0 ? (
+          <>
+            <div className="flex items-center justify-center gap-2 text-slate-600 mb-4">
+              <Zap className="h-5 w-5 text-blue-500" />
+              <span className="font-medium">
+                {stats.pending} insight{stats.pending !== 1 ? 's' : ''} left to review
+              </span>
+            </div>
+            <p className="text-slate-500 text-sm mb-6 max-w-md mx-auto">
+              Approved insights become requirements in your BRD. Take your time to review each one.
+            </p>
+          </>
+        ) : (
+          <>
+            <div className="w-16 h-16 bg-emerald-100 rounded-2xl flex items-center justify-center mx-auto mb-4">
+              <CheckCircle2 className="h-8 w-8 text-emerald-600" />
+            </div>
+            <h3 className="text-xl font-bold text-slate-900 mb-2">All insights reviewed!</h3>
+            <p className="text-slate-500 text-sm mb-6 max-w-md mx-auto">
+              {stats.approved} approved insights ready to generate your BRD.
+            </p>
+          </>
+        )}
+
+        <div className="flex flex-wrap items-center justify-center gap-3">
+          {hasBRD && onNavigateToBRD && (
             <Button 
               variant="outline"
               size="lg" 
               onClick={onNavigateToBRD}
-              className="h-16 px-8 text-lg font-bold rounded-2xl border-amber-200 text-amber-700 hover:bg-amber-50"
+              className="px-6 py-3 rounded-xl"
             >
-              <RefreshCw className="mr-3 h-5 w-5" /> Update BRD
+              View Current BRD
             </Button>
           )}
           
@@ -567,22 +667,23 @@ const InsightsReview: React.FC<InsightsReviewProps> = ({ project, onUpdate, onCo
             size="lg" 
             onClick={onContinue}
             disabled={stats.approved === 0}
-            className={`h-16 px-10 text-xl font-bold rounded-2xl shadow-2xl transition-all transform active:scale-95 ${stats.approved > 0 ? 'shadow-blue-500/30' : 'opacity-50 grayscale cursor-not-allowed'}`}
+            className={`px-8 py-3 rounded-xl font-semibold shadow-lg transition-all ${
+              stats.approved > 0 
+                ? 'shadow-blue-200 hover:shadow-xl hover:shadow-blue-200' 
+                : 'opacity-50 cursor-not-allowed'
+            }`}
           >
-            {hasBRD ? (
-              <>View BRD <ArrowRight className="ml-3 h-6 w-6" /></>
-            ) : (
-              <>Approve Insights & Generate BRD <ArrowRight className="ml-3 h-6 w-6" /></>
-            )}
+            {hasBRD ? 'Update BRD' : 'Generate BRD'}
+            <ArrowRight className="ml-2 h-5 w-5" />
           </Button>
         </div>
-        
-        <p className="text-slate-400 text-xs text-center max-w-md">
-          {hasBRD 
-            ? "Your BRD uses the approved insights. Regenerate to include any new approvals."
-            : "Generated BRDs are based exclusively on approved insights. You can always come back and refine these later."
-          }
-        </p>
+
+        {stats.approved === 0 && (
+          <p className="text-amber-600 text-sm mt-4 flex items-center justify-center gap-2">
+            <AlertTriangle className="h-4 w-4" />
+            Approve at least one insight to generate your BRD
+          </p>
+        )}
       </div>
     </div>
   );

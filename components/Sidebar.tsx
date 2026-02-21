@@ -30,6 +30,7 @@ interface SidebarProps {
 const Sidebar: React.FC<SidebarProps> = ({ activeTab, setActiveTab, collapsed = false, onToggleCollapse, mobileOpen = false, onCloseMobile }) => {
   const { navigateTo } = useNavigation();
   const [project, setProject] = React.useState<ProjectState | null>(null);
+  const [hasStatusReport, setHasStatusReport] = React.useState(false);
   const projectFetched = React.useRef(false);
 
   React.useEffect(() => {
@@ -46,16 +47,117 @@ const Sidebar: React.FC<SidebarProps> = ({ activeTab, setActiveTab, collapsed = 
     }
   }, [activeTab]);
 
+  // Check for status report in localStorage
+  React.useEffect(() => {
+    const checkStatusReport = () => {
+      if (project?.id) {
+        const reportHistory = localStorage.getItem(`clarity_report_history_${project.id}`);
+        if (reportHistory) {
+          try {
+            const parsed = JSON.parse(reportHistory);
+            setHasStatusReport(Array.isArray(parsed) && parsed.length > 0);
+          } catch {
+            setHasStatusReport(false);
+          }
+        } else {
+          setHasStatusReport(false);
+        }
+      }
+    };
+    
+    checkStatusReport();
+    
+    // Listen for real-time updates when status report is generated
+    const handleStatusReportGenerated = () => checkStatusReport();
+    window.addEventListener('statusReportGenerated', handleStatusReportGenerated);
+    
+    return () => {
+      window.removeEventListener('statusReportGenerated', handleStatusReportGenerated);
+    };
+  }, [project?.id, activeTab]);
+
+  // Calculate status for each page: 'green' (ready), 'yellow' (needs attention), 'red' (not ready/blocked)
+  const getPageStatus = (pageId: string): 'green' | 'yellow' | 'red' => {
+    if (!project) return 'red';
+    
+    const hasSources = project.sources && project.sources.length > 0;
+    const hasContext = !!project.description;
+    const hasInsights = project.insights && project.insights.length > 0;
+    const hasApprovedInsights = project.insights?.some(i => i.status === 'approved');
+    const hasPendingInsights = project.insights?.some(i => i.status === 'pending');
+    const hasBRD = !!project.brd;
+    const hasConflicts = project.insights?.some(i => i.hasConflicts || (i.conflictingInsightIds && i.conflictingInsightIds.length > 0));
+    
+    switch (pageId) {
+      case 'dashboard':
+        // Dashboard is always accessible, green if we have any data
+        if (hasBRD || hasApprovedInsights) return 'green';
+        if (hasSources || hasContext) return 'yellow';
+        return 'red';
+        
+      case 'sources':
+        // Green if has sources, yellow if empty (needs sources)
+        return hasSources ? 'green' : 'yellow';
+        
+      case 'context':
+        // Green if context filled, yellow if needs context
+        return hasContext ? 'green' : 'yellow';
+        
+      case 'insights':
+        // Green if has approved, yellow if has pending to review, red if no insights
+        if (hasApprovedInsights) return 'green';
+        if (hasPendingInsights) return 'yellow';
+        return 'red';
+        
+      case 'generate':
+        // Green if BRD exists, yellow if can generate (has approved), red if blocked
+        if (hasBRD) return 'green';
+        if (hasApprovedInsights) return 'yellow';
+        return 'red';
+        
+      case 'conflicts':
+        // Green if no conflicts, yellow if has conflicts to resolve, red if no insights
+        if (!hasInsights) return 'red';
+        if (hasConflicts) return 'yellow';
+        return 'green';
+        
+      case 'traceability':
+        // Green if has approved insights, yellow if has insights, red if none
+        if (hasApprovedInsights) return 'green';
+        if (hasInsights) return 'yellow';
+        return 'red';
+        
+      case 'sentiment':
+        // Green if has insights to analyze, red if no insights
+        if (hasInsights) return 'green';
+        return 'red';
+        
+      case 'status-report':
+        // Green if report has been generated, yellow if has data to generate, red if no data
+        if (hasStatusReport) return 'green';
+        if (hasBRD || hasApprovedInsights) return 'yellow';
+        return 'red';
+        
+      case 'graph':
+        // Green if has insights to visualize, red if no data
+        if (hasInsights) return 'green';
+        return 'red';
+        
+      default:
+        return 'red';
+    }
+  };
+
   const mainMenuItems = [
     { id: 'dashboard', label: 'Dashboard', icon: LayoutDashboard },
-    { id: 'sources', label: 'Data Sources', icon: Database, status: project?.sources.length ? 'complete' : undefined },
-    { id: 'context', label: 'Project Context', icon: Target, status: project?.description ? 'complete' : undefined },
-    { id: 'insights', label: 'Insights Review', icon: Lightbulb, status: project?.insights.some(i => i.status === 'approved') ? 'complete' : 'alert' },
-    { id: 'generate', label: 'BRD Generation', icon: FileText, status: project?.brd ? 'complete' : undefined },
+    { id: 'sources', label: 'Data Sources', icon: Database },
+    { id: 'context', label: 'Project Context', icon: Target },
+    { id: 'insights', label: 'Insights Review', icon: Lightbulb },
+    { id: 'generate', label: 'BRD Generation', icon: FileText },
   ];
 
   const analysisMenuItems = [
-    { id: 'conflicts', label: 'Conflict Detection', icon: ShieldAlert, badge: (project as any)?.conflicts?.filter((c: any) => c.status === 'unresolved')?.length },
+    { id: 'conflicts', label: 'Conflict Detection', icon: ShieldAlert },
     { id: 'traceability', label: 'Traceability Matrix', icon: Table2 },
     { id: 'sentiment', label: 'Stakeholder Sentiment', icon: Heart },
     { id: 'status-report', label: 'Status Reports', icon: ClipboardList },
@@ -64,6 +166,14 @@ const Sidebar: React.FC<SidebarProps> = ({ activeTab, setActiveTab, collapsed = 
 
   const renderMenuItem = (item: any) => {
     const isActive = activeTab === item.id;
+    const status = getPageStatus(item.id);
+    
+    const statusColors = {
+      green: 'bg-emerald-500',
+      yellow: 'bg-amber-500 animate-pulse',
+      red: 'bg-red-500/70'
+    };
+    
     return (
       <button
         key={item.id}
@@ -76,21 +186,23 @@ const Sidebar: React.FC<SidebarProps> = ({ activeTab, setActiveTab, collapsed = 
         title={collapsed ? item.label : undefined}
       >
         <div className={`flex items-center ${collapsed ? '' : 'gap-3'}`}>
-          <item.icon className={`h-5 w-5 flex-shrink-0 ${isActive ? 'text-white' : 'text-slate-500 group-hover:text-white'}`} />
+          <div className="relative">
+            <item.icon className={`h-5 w-5 flex-shrink-0 ${isActive ? 'text-white' : 'text-slate-500 group-hover:text-white'}`} />
+            {/* Status dot on icon when collapsed */}
+            {collapsed && (
+              <div className={`absolute -top-0.5 -right-0.5 w-2 h-2 rounded-full ${statusColors[status]} ring-2 ring-slate-900`}></div>
+            )}
+          </div>
           {!collapsed && <span className="font-medium text-sm">{item.label}</span>}
         </div>
         
-        {/* Status Indicators */}
-        {!collapsed && item.status === 'complete' && (
-          <div className="w-1.5 h-1.5 rounded-full bg-emerald-500"></div>
-        )}
-        {!collapsed && item.status === 'alert' && (
-          <div className="w-1.5 h-1.5 rounded-full bg-orange-500 animate-pulse"></div>
-        )}
-        {!collapsed && item.badge > 0 && (
-          <span className="px-1.5 py-0.5 text-[10px] font-bold bg-red-500 text-white rounded-full min-w-[18px] text-center">
-            {item.badge}
-          </span>
+        {/* Status Indicator - shown when not collapsed */}
+        {!collapsed && (
+          <div className={`w-2 h-2 rounded-full ${statusColors[status]}`} title={
+            status === 'green' ? 'Ready' : 
+            status === 'yellow' ? 'Needs attention' : 
+            'Not ready'
+          }></div>
         )}
       </button>
     );

@@ -3,11 +3,28 @@ import { Task, Insight, BRDSection } from "../db";
 
 const ai = new GoogleGenAI({ apiKey: import.meta.env.VITE_GEMINI_API_KEY });
 
-// Use the cheapest, fastest model
-const modelId = "gemini-2.0-flash";
+// Use the cheapest, fastest model with optimized settings
+const modelId = "gemini-2.5-flash";
 
 // ============================================================================
-// CACHING LAYER - Minimize API costs
+// AI SPEED OPTIMIZATIONS
+// ============================================================================
+
+// Model configuration for faster responses
+const FAST_CONFIG = {
+  temperature: 0.3, // Lower temperature = faster, more deterministic
+  topP: 0.8,
+  topK: 40,
+  maxOutputTokens: 4096, // Limit output size for speed
+};
+
+const QUICK_CONFIG = {
+  ...FAST_CONFIG,
+  maxOutputTokens: 1024, // Even smaller for quick operations
+};
+
+// ============================================================================
+// CACHING LAYER - Minimize API costs & speed up responses
 // ============================================================================
 
 interface CacheEntry<T> {
@@ -17,7 +34,7 @@ interface CacheEntry<T> {
 }
 
 const cache = new Map<string, CacheEntry<any>>();
-const CACHE_TTL = 10 * 60 * 1000; // 10 minutes cache lifetime
+const CACHE_TTL = 15 * 60 * 1000; // 15 minutes cache lifetime (increased)
 
 const getCacheKey = (...args: any[]): string => {
   return JSON.stringify(args).slice(0, 500); // Limit key size
@@ -38,14 +55,35 @@ const getFromCache = <T>(key: string): T | null => {
 };
 
 const setCache = <T>(key: string, data: T): void => {
-  // Limit cache size to 50 entries
-  if (cache.size >= 50) {
-    const oldestKey = cache.keys().next().value;
-    if (oldestKey) cache.delete(oldestKey);
+  // Limit cache size to 100 entries (increased capacity)
+  if (cache.size >= 100) {
+    // Remove oldest 10% when full
+    const keysToRemove = Array.from(cache.keys()).slice(0, 10);
+    keysToRemove.forEach(k => cache.delete(k));
   }
   
   cache.set(key, { data, timestamp: Date.now(), key });
   console.log('[AI Cache] SET:', key.slice(0, 50) + '...');
+};
+
+// Pre-warm cache with common operations
+const pendingRequests = new Map<string, Promise<any>>();
+
+// Deduplicate concurrent identical requests
+const deduplicateRequest = async <T>(key: string, requestFn: () => Promise<T>): Promise<T> => {
+  // Check if same request is already in flight
+  const pending = pendingRequests.get(key);
+  if (pending) {
+    console.log('[AI] Deduplicating request:', key.slice(0, 50));
+    return pending as Promise<T>;
+  }
+  
+  // Start new request and track it
+  const promise = requestFn().finally(() => {
+    pendingRequests.delete(key);
+  });
+  pendingRequests.set(key, promise);
+  return promise;
 };
 
 // Clear cache for a project when data changes significantly
@@ -76,6 +114,110 @@ const trackAPICall = () => {
   apiCallCount++;
   apiCallsThisSession++;
   console.log(`[AI] API Call #${apiCallsThisSession} this session`);
+};
+
+// ============================================================================
+// BATCH PROCESSING - Process multiple items efficiently
+// ============================================================================
+
+interface BatchItem<T, R> {
+  input: T;
+  resolve: (result: R) => void;
+  reject: (error: Error) => void;
+}
+
+const batchQueues = new Map<string, BatchItem<any, any>[]>();
+const batchTimers = new Map<string, NodeJS.Timeout>();
+const BATCH_DELAY = 50; // ms to wait for batching
+const MAX_BATCH_SIZE = 10;
+
+// Generic batch processor for AI requests
+export const batchProcess = <T, R>(
+  queueKey: string,
+  input: T,
+  processBatch: (items: T[]) => Promise<R[]>
+): Promise<R> => {
+  return new Promise((resolve, reject) => {
+    let queue = batchQueues.get(queueKey);
+    if (!queue) {
+      queue = [];
+      batchQueues.set(queueKey, queue);
+    }
+
+    queue.push({ input, resolve, reject });
+
+    // Clear existing timer
+    const existingTimer = batchTimers.get(queueKey);
+    if (existingTimer) {
+      clearTimeout(existingTimer);
+    }
+
+    // Process immediately if max batch size reached
+    if (queue.length >= MAX_BATCH_SIZE) {
+      processBatchQueue(queueKey, processBatch);
+    } else {
+      // Otherwise, wait for more items
+      const timer = setTimeout(() => {
+        processBatchQueue(queueKey, processBatch);
+      }, BATCH_DELAY);
+      batchTimers.set(queueKey, timer as unknown as NodeJS.Timeout);
+    }
+  });
+};
+
+const processBatchQueue = async <T, R>(
+  queueKey: string,
+  processBatch: (items: T[]) => Promise<R[]>
+): Promise<void> => {
+  const queue = batchQueues.get(queueKey);
+  if (!queue || queue.length === 0) return;
+
+  // Take all items from queue
+  const items = [...queue];
+  batchQueues.set(queueKey, []);
+  batchTimers.delete(queueKey);
+
+  try {
+    const inputs = items.map(item => item.input);
+    const results = await processBatch(inputs);
+    
+    // Distribute results
+    items.forEach((item, idx) => {
+      if (results[idx]) {
+        item.resolve(results[idx]);
+      } else {
+        item.reject(new Error('No result for batch item'));
+      }
+    });
+  } catch (error) {
+    items.forEach(item => item.reject(error as Error));
+  }
+};
+
+// Pre-compute analysis for faster subsequent requests
+export const precomputeProjectAnalysis = async (
+  projectName: string,
+  insights: Insight[],
+  sources: { name: string; content?: string }[]
+): Promise<void> => {
+  console.log('[AI] Pre-computing analysis for project:', projectName);
+  
+  // Fire and forget - pre-warm cache for common operations
+  const precomputePromises = [];
+
+  // Only precompute if not already cached
+  if (insights.length > 0) {
+    const conflictKey = getCacheKey('conflicts', insights.slice(0, 5).map(i => i.id).join(','));
+    if (!getFromCache(conflictKey)) {
+      // This will cache the result for future use
+      precomputePromises.push(
+        detectConflicts(insights).catch(e => console.log('[AI] Precompute conflict detection failed:', e))
+      );
+    }
+  }
+
+  await Promise.allSettled(precomputePromises);
+  console.log('[AI] Pre-computation complete for:', projectName);
 };
 
 // ============================================================================
@@ -180,6 +322,37 @@ export const generateBRD = async (
 ): Promise<Omit<BRDSection, 'id'>[]> => {
   const approvedInsights = insights.filter(i => i.status === 'approved');
   
+  // Categorize insights by type and priority
+  const mustHave = approvedInsights.filter(i => i.priority === 'must');
+  const shouldHave = approvedInsights.filter(i => i.priority === 'should');
+  const couldHave = approvedInsights.filter(i => i.priority === 'could');
+  const requirements = approvedInsights.filter(i => i.category === 'requirement');
+  const decisions = approvedInsights.filter(i => i.category === 'decision');
+  const stakeholders = approvedInsights.filter(i => i.category === 'stakeholder');
+  const timelines = approvedInsights.filter(i => i.category === 'timeline');
+  const questions = approvedInsights.filter(i => i.category === 'question');
+  const conflictInsights = approvedInsights.filter(i => i.hasConflicts);
+  
+  // Calculate average confidence
+  const avgConfidence = approvedInsights.length > 0 
+    ? Math.round(approvedInsights.reduce((sum, i) => sum + (i.confidenceScore || 50), 0) / approvedInsights.length)
+    : 50;
+  
+  // Extract unique stakeholder mentions
+  const allStakeholders = [...new Set(approvedInsights.flatMap(i => i.stakeholderMentions || []))];
+  
+  // Extract unique sources
+  const allSources = [...new Set(approvedInsights.map(i => i.source))];
+  
+  // Format insight for prompt with all metadata
+  const formatInsight = (i: Insight) => {
+    const priority = i.priority && i.priority !== 'unset' ? `[${i.priority.toUpperCase()}]` : '';
+    const confidence = i.confidenceScore ? `(${i.confidenceScore}% confident)` : '';
+    const conflict = i.hasConflicts ? '⚠️ HAS CONFLICTS' : '';
+    const stakeholderRefs = i.stakeholderMentions?.length ? `| Stakeholders: ${i.stakeholderMentions.join(', ')}` : '';
+    return `- ${priority} [${i.category.toUpperCase()}] ${i.summary}: ${i.detail} (Source: ${i.source}) ${confidence} ${conflict} ${stakeholderRefs}`;
+  };
+  
   // Cache based on project and approved insight summaries
   const insightSummaries = approvedInsights.map(i => i.summary).sort().join(',');
   const cacheKey = getCacheKey('generateBRD', project.name, project.goals, insightSummaries.slice(0, 300));
@@ -187,102 +360,178 @@ export const generateBRD = async (
   if (cached) return cached;
   
   const prompt = `
-    You are an expert Business Analyst AI. Generate a structured Business Requirements Document (BRD) based on the following project context and approved insights.
-    
-    Project Name: ${project.name}
-    Description: ${project.description || "Not specified"}
-    Goals: ${project.goals || "Not specified"}
-    
-    Approved Insights:
-    ${approvedInsights.length > 0 ? approvedInsights.map(i => `- [${i.category.toUpperCase()}] ${i.summary}: ${i.detail} (Source: ${i.source})`).join('\n') : '- No approved insights yet. Generate placeholder content based on project context.'}
-    
-    IMPORTANT: You MUST generate EXACTLY 9 sections in the following order. Do not combine or skip any sections:
-    
-    1. "Executive Summary" - High-level overview of the project, its purpose, and key outcomes. Include project vision, scope summary, and expected business value.
-    
-    2. "Business Objectives" - Specific, measurable goals using SMART criteria (Specific, Measurable, Achievable, Relevant, Time-bound). Include success criteria.
-    
-    3. "Stakeholder Analysis" - Key stakeholders with their:
-       - Roles and responsibilities
-       - Interest level (High/Medium/Low)
-       - Influence level (High/Medium/Low)
-       - Communication needs
-       - Key concerns
-    
-    4. "Functional Requirements" - Detailed features and behaviors the system MUST do:
-       - Use requirement IDs (FR-001, FR-002, etc.)
-       - Include priority (Must Have/Should Have/Could Have/Won't Have)
-       - User stories format: "As a [role], I want [feature] so that [benefit]"
-       - Acceptance criteria for each major feature
-    
-    5. "Non-Functional Requirements" - Quality attributes with specific, measurable criteria. MUST include sub-sections for:
-       
-       ### Performance Requirements
-       - Response time targets (e.g., "Page load < 3 seconds at 95th percentile")
-       - Throughput requirements (e.g., "Support 1000 concurrent users")
-       - Resource utilization limits
-       
-       ### Security Requirements
-       - Authentication mechanisms
-       - Authorization/access control
-       - Data encryption standards (at rest and in transit)
-       - Compliance requirements (GDPR, SOC2, etc.)
-       - Audit logging requirements
-       
-       ### Scalability Requirements
-       - Horizontal/vertical scaling needs
-       - Auto-scaling triggers
-       - Peak load handling
-       
-       ### Reliability & Availability
-       - Uptime requirements (e.g., "99.9% availability")
-       - Disaster recovery objectives (RTO/RPO)
-       - Backup requirements
-       - Failover mechanisms
-       
-       ### Usability Requirements
-       - Accessibility standards (WCAG 2.1 AA)
-       - Browser/device compatibility
-       - Localization/internationalization needs
-       
-       ### Maintainability Requirements
-       - Code quality standards
-       - Documentation requirements
-       - Technical debt management
-    
-    6. "Assumptions & Constraints"
-       - Technical assumptions
-       - Business assumptions
-       - Resource constraints
-       - Timeline constraints
-       - Budget constraints
-       - Out of scope items
-    
-    7. "Dependencies & Integrations"
-       - External system dependencies
-       - Third-party services
-       - Data dependencies
-       - Team/resource dependencies
-    
-    8. "Success Metrics & KPIs"
-       - Quantitative metrics with targets
-       - Qualitative success criteria
-       - Measurement methods
-       - Review frequency
-    
-    9. "Timeline & Milestones"
-       - Project phases with dates
-       - Key deliverables per phase
-       - Decision points/gates
-       - Risk buffer allocation
-    
-    For EACH of the 9 sections, provide:
-    - title: The exact section title as listed above
-    - content: Detailed content in Markdown format with bullet points, sub-headings where appropriate. Be specific and actionable.
-    - sources: An array of source names that contributed to this section (from the insights)
-    - confidence: A confidence score (0-100) based on how well the insights support this section
-    
-    Return JSON as an array of exactly 9 section objects.
+You are a Senior Business Analyst with 15+ years of experience creating enterprise-grade Business Requirements Documents. Generate a comprehensive, professional BRD based on the following project context and AI-analyzed insights.
+
+═══════════════════════════════════════════════════════════════════════════════
+PROJECT OVERVIEW
+═══════════════════════════════════════════════════════════════════════════════
+Project Name: ${project.name}
+Description: ${project.description || "Enterprise software project"}
+Strategic Goals: ${project.goals || "Deliver value to stakeholders through digital transformation"}
+
+═══════════════════════════════════════════════════════════════════════════════
+INSIGHT ANALYSIS SUMMARY
+═══════════════════════════════════════════════════════════════════════════════
+Total Approved Insights: ${approvedInsights.length}
+Average AI Confidence: ${avgConfidence}%
+Data Sources Analyzed: ${allSources.length} (${allSources.slice(0, 5).join(', ')}${allSources.length > 5 ? '...' : ''})
+Identified Stakeholders: ${allStakeholders.length > 0 ? allStakeholders.join(', ') : 'To be identified'}
+Insights with Conflicts: ${conflictInsights.length} (require resolution)
+Open Questions: ${questions.length}
+
+Priority Distribution:
+- Must Have (Critical): ${mustHave.length} insights
+- Should Have (Important): ${shouldHave.length} insights  
+- Could Have (Nice-to-have): ${couldHave.length} insights
+
+Category Breakdown:
+- Requirements: ${requirements.length}
+- Decisions: ${decisions.length}
+- Stakeholder Info: ${stakeholders.length}
+- Timeline/Milestones: ${timelines.length}
+- Open Questions: ${questions.length}
+
+═══════════════════════════════════════════════════════════════════════════════
+APPROVED INSIGHTS (PRIORITIZED)
+═══════════════════════════════════════════════════════════════════════════════
+
+${mustHave.length > 0 ? `🔴 MUST HAVE (Critical Requirements):\n${mustHave.map(formatInsight).join('\n')}\n` : ''}
+${shouldHave.length > 0 ? `🟡 SHOULD HAVE (Important):\n${shouldHave.map(formatInsight).join('\n')}\n` : ''}
+${couldHave.length > 0 ? `🟢 COULD HAVE (Nice-to-have):\n${couldHave.map(formatInsight).join('\n')}\n` : ''}
+${approvedInsights.filter(i => !i.priority || i.priority === 'unset').length > 0 ? `⚪ UNPRIORITIZED:\n${approvedInsights.filter(i => !i.priority || i.priority === 'unset').map(formatInsight).join('\n')}\n` : ''}
+
+${conflictInsights.length > 0 ? `⚠️ CONFLICTING INSIGHTS (Need Resolution):\n${conflictInsights.map(formatInsight).join('\n')}\n` : ''}
+
+${approvedInsights.length === 0 ? '⚠️ No approved insights yet. Generate intelligent placeholder content based on project context and industry best practices.\n' : ''}
+
+═══════════════════════════════════════════════════════════════════════════════
+BRD GENERATION REQUIREMENTS
+═══════════════════════════════════════════════════════════════════════════════
+
+Generate EXACTLY 9 sections following IEEE 830 and BABOK standards:
+
+1. "Executive Summary"
+   - Project vision and strategic alignment
+   - Business problem and proposed solution
+   - Key benefits and expected ROI
+   - Scope summary (in-scope/out-of-scope)
+   - Critical success factors
+   - Target delivery timeline
+
+2. "Business Objectives"
+   - SMART objectives (Specific, Measurable, Achievable, Relevant, Time-bound)
+   - Key Results (OKRs) if applicable
+   - Business value quantification where possible
+   - Alignment to organizational strategy
+   - Success criteria per objective
+
+3. "Stakeholder Analysis"
+   - Stakeholder register with roles: ${allStakeholders.length > 0 ? allStakeholders.join(', ') : 'Identify from context'}
+   - RACI matrix for key activities
+   - Interest/Influence grid classification
+   - Communication requirements per stakeholder type
+   - Known concerns and mitigation strategies
+   - Approval authority matrix
+
+4. "Functional Requirements"
+   - Organized by feature area with requirement IDs (FR-001, FR-002...)
+   - MoSCoW prioritization based on insights (Must: ${mustHave.filter(i => i.category === 'requirement').length}, Should: ${shouldHave.filter(i => i.category === 'requirement').length}, Could: ${couldHave.filter(i => i.category === 'requirement').length})
+   - User stories: "As a [role], I want [feature] so that [benefit]"
+   - Acceptance criteria (Given/When/Then format)
+   - Dependencies between requirements
+   - Testability considerations
+
+5. "Non-Functional Requirements"
+   Structure with these mandatory subsections:
+   
+   ### Performance Requirements
+   - Response time SLAs (P95, P99 percentiles)
+   - Throughput capacity (transactions/sec, concurrent users)
+   - Resource utilization thresholds
+   
+   ### Security Requirements
+   - Authentication (OAuth2.0, SSO, MFA requirements)
+   - Authorization model (RBAC, ABAC)
+   - Data encryption (AES-256 at rest, TLS 1.3 in transit)
+   - Compliance frameworks (GDPR, SOC2, HIPAA, PCI-DSS as applicable)
+   - Security audit and logging requirements
+   - Vulnerability management
+   
+   ### Scalability Requirements
+   - Horizontal/vertical scaling strategy
+   - Auto-scaling triggers and thresholds
+   - Data partitioning/sharding needs
+   - Geographic distribution requirements
+   
+   ### Reliability & Availability
+   - SLA targets (99.9%, 99.95%, 99.99%)
+   - RTO (Recovery Time Objective)
+   - RPO (Recovery Point Objective)
+   - Disaster recovery strategy
+   - Business continuity requirements
+   
+   ### Usability Requirements
+   - WCAG 2.1 AA accessibility compliance
+   - Supported platforms/browsers
+   - Internationalization (i18n) requirements
+   - UX performance benchmarks
+   
+   ### Maintainability Requirements
+   - Code quality standards and tooling
+   - Documentation requirements
+   - API versioning strategy
+   - Technical debt management approach
+
+6. "Assumptions & Constraints"
+   - Technical assumptions with validation approach
+   - Business assumptions with risk if incorrect
+   - Resource constraints (budget, personnel, timeline)
+   - Technical constraints (legacy systems, technology stack)
+   - Regulatory/compliance constraints
+   - Explicitly out-of-scope items
+
+7. "Dependencies & Integrations"
+   - Internal system dependencies (with API/data contracts)
+   - External third-party integrations
+   - Data flow diagrams (describe in text)
+   - Integration SLAs and fallback strategies
+   - Team dependencies and coordination points
+
+8. "Success Metrics & KPIs"
+   - Quantitative metrics with specific targets
+   - Baseline measurements where applicable
+   - Measurement methodology and frequency
+   - Dashboard/reporting requirements
+   - Business outcome metrics vs. technical metrics
+
+9. "Timeline & Milestones"
+   - Phase breakdown with deliverables
+   - Key milestones and decision gates
+   - Critical path identification
+   - Risk buffer allocation (recommend 15-20%)
+   - Go/No-Go criteria per phase
+   ${timelines.length > 0 ? `\n   Reference timeline insights: ${timelines.map(t => t.summary).join('; ')}` : ''}
+
+═══════════════════════════════════════════════════════════════════════════════
+OUTPUT FORMAT
+═══════════════════════════════════════════════════════════════════════════════
+
+For EACH section provide:
+- title: Exact section title from above
+- content: Professional Markdown with:
+  • Clear hierarchy (## for subsections, ### for sub-subsections)
+  • Bullet points for lists
+  • Tables where appropriate (stakeholder matrix, requirement tables)
+  • Specific, actionable language (avoid vague statements)
+  • Reference specific insights where relevant
+  • Flag areas with low confidence or conflicts needing resolution
+- sources: Array of source names that informed this section
+- confidence: Score 0-100 based on:
+  • Insight coverage and quality
+  • Presence of conflicts (reduce confidence)
+  • Specificity of available information
+
+Return JSON array of exactly 9 section objects. Be comprehensive yet concise - a production-ready BRD.
   `;
 
   try {
@@ -325,21 +574,48 @@ export const refineBRD = async (
   instruction: string
 ): Promise<Omit<BRDSection, 'id'>[]> => {
   const prompt = `
-    You are an expert Business Analyst AI. Refine the following Business Requirements Document (BRD) based on the user's instruction.
-    
-    Current BRD Sections:
-    ${currentBRD.sections.map(s => `### ${s.title}\n${s.content}`).join('\n\n')}
-    
-    User Instruction: "${instruction}"
-    
-    Maintain the same structure but update the content as requested. 
-    Return the FULL updated BRD as a JSON array of sections.
-    
-    For each section, provide:
-    - title: The section title.
-    - content: The detailed content in Markdown format.
-    - sources: An array of source names that contributed to this section.
-    - confidence: A confidence score (0-100) for this section.
+You are a Senior Business Analyst with expertise in requirements engineering. Refine the following Business Requirements Document (BRD) based on the user's instruction.
+
+═══════════════════════════════════════════════════════════════════════════════
+CURRENT BRD CONTENT
+═══════════════════════════════════════════════════════════════════════════════
+${currentBRD.sections.map(s => `### ${s.title} (Confidence: ${s.confidence || 'N/A'}%)\n${s.content}\nSources: ${s.sources?.join(', ') || 'None'}`).join('\n\n---\n\n')}
+
+═══════════════════════════════════════════════════════════════════════════════
+USER REFINEMENT REQUEST
+═══════════════════════════════════════════════════════════════════════════════
+"${instruction}"
+
+═══════════════════════════════════════════════════════════════════════════════
+REFINEMENT GUIDELINES
+═══════════════════════════════════════════════════════════════════════════════
+1. Understand the user's intent:
+   - Are they asking to ADD new content?
+   - Are they asking to MODIFY existing content?
+   - Are they asking to REMOVE something?
+   - Are they asking for MORE DETAIL in a section?
+   - Are they changing TONE or FORMALITY?
+
+2. Apply changes intelligently:
+   - Maintain IEEE 830/BABOK compliance
+   - Keep consistent formatting and style
+   - Preserve section structure unless explicitly asked to change
+   - Update confidence scores if you're making assumptions
+   - Add [REFINED] markers to significantly changed sections
+
+3. Quality standards:
+   - Use specific, measurable language
+   - Include rationale for major changes
+   - Flag any areas that may need stakeholder review
+   - Maintain traceability to original sources where applicable
+
+Return the COMPLETE updated BRD with all 9 sections (even if only some were modified).
+
+For each section:
+- title: The section title (keep original titles)
+- content: Updated Markdown content
+- sources: Preserved or updated source array
+- confidence: Adjusted confidence (0-100) - may decrease if adding speculative content
   `;
 
   try {
@@ -392,26 +668,52 @@ export const proposeBRDEdit = async (
 ): Promise<BRDEditProposal> => {
   const approvedInsights = insights.filter(i => i.status === 'approved');
   
+  // Format insights with priority and confidence
+  const formatInsight = (i: Insight) => {
+    const priority = i.priority && i.priority !== 'unset' ? `[${i.priority.toUpperCase()}]` : '';
+    const confidence = i.confidenceScore ? `(${i.confidenceScore}%)` : '';
+    return `- ${priority} ${i.summary}: ${i.detail} (Source: ${i.source}) ${confidence}`;
+  };
+  
   const prompt = `
-    You are an expert Business Analyst AI. A user wants to edit a specific part of a Business Requirements Document (BRD).
-    
-    Current BRD Sections:
-    ${currentBRD.sections.map(s => `### ${s.title}\n${s.content}`).join('\n\n')}
-    
-    User Instruction: "${instruction}"
-    
-    Available Approved Insights for Context:
-    ${approvedInsights.map(i => `- ${i.summary}: ${i.detail} (Source: ${i.source})`).join('\n')}
-    
-    Your task:
-    1. Identify which sections of the BRD are affected by this instruction.
-    2. Provide the updated content for ONLY those sections.
-    3. Provide a brief reasoning for the changes.
-    4. List which insights were referenced for these changes.
-    
-    Return JSON with:
-    - affectedSectionTitles: Array of strings.
-    - updatedSections: Array of objects with {title, content, reasoning, referencedInsights}.
+You are a Senior Business Analyst reviewing a targeted edit request for a Business Requirements Document.
+
+═══════════════════════════════════════════════════════════════════════════════
+CURRENT BRD STRUCTURE
+═══════════════════════════════════════════════════════════════════════════════
+${currentBRD.sections.map(s => `### ${s.title}\n${s.content.slice(0, 500)}${s.content.length > 500 ? '...' : ''}`).join('\n\n')}
+
+═══════════════════════════════════════════════════════════════════════════════
+USER EDIT REQUEST
+═══════════════════════════════════════════════════════════════════════════════
+"${instruction}"
+
+═══════════════════════════════════════════════════════════════════════════════
+AVAILABLE INSIGHTS FOR REFERENCE
+═══════════════════════════════════════════════════════════════════════════════
+${approvedInsights.length > 0 ? approvedInsights.map(formatInsight).join('\n') : 'No approved insights available.'}
+
+═══════════════════════════════════════════════════════════════════════════════
+ANALYSIS TASK
+═══════════════════════════════════════════════════════════════════════════════
+1. Analyze the edit request to understand:
+   - Scope of changes (which sections affected)
+   - Type of change (add/modify/remove/clarify)
+   - Relationship to existing insights
+
+2. For ONLY the affected sections, provide:
+   - Updated content meeting IEEE 830/BABOK standards
+   - Clear reasoning for each change
+   - References to insights used (if any)
+
+3. Impact assessment:
+   - Consider downstream effects on other sections
+   - Maintain cross-section consistency
+   - Flag if changes require stakeholder review
+
+Return JSON with:
+- affectedSectionTitles: Array of section titles that need updating
+- updatedSections: Array of {title, content (full Markdown), reasoning (1-2 sentences), referencedInsights (insight summaries used)}
   `;
 
   try {
@@ -481,83 +783,74 @@ export const detectConflicts = async (
   const cached = getFromCache<RequirementConflict[]>(cacheKey);
   if (cached) return cached;
 
-  const prompt = `
-    You are an expert Business Analyst AI specializing in requirements conflict detection.
-    
-    Analyze these requirements/insights from different sources and identify ANY conflicts, contradictions, ambiguities, or overlapping requirements:
-    
-    ${approvedInsights.map((i, idx) => `[${idx + 1}] ID: ${i.id}
-    Category: ${i.category}
-    Source: ${i.source} (${i.sourceType})
-    Summary: ${i.summary}
-    Detail: ${i.detail}
-    Confidence: ${i.confidence}`).join('\n\n')}
-    
-    For EACH conflict found, provide:
-    - type: 'contradiction' (directly conflicting statements), 'ambiguity' (unclear or vague), 'overlap' (redundant/duplicate), 'dependency' (implicit dependency not stated)
-    - severity: 'critical' (blocks progress), 'major' (needs resolution before BRD), 'minor' (can be noted)
-    - insight1Index: Index (1-based) of first conflicting insight
-    - insight2Index: Index (1-based) of second conflicting insight  
-    - description: Clear explanation of the conflict
-    - suggestedResolution: Actionable recommendation to resolve
-    - affectedBRDSections: Array of BRD section titles likely affected
-    
-    Return an array of conflicts. If no conflicts, return empty array [].
-  `;
+  // Use deduplication to prevent concurrent identical requests
+  return deduplicateRequest(cacheKey, async () => {
+    // OPTIMIZED: Compact prompt format for faster processing
+    const compactInsights = approvedInsights.map((i, idx) => 
+      `[${idx + 1}] ${i.category}|${i.source}|${i.summary.slice(0, 80)}|${i.detail.slice(0, 120)}`
+    ).join('\n');
 
-  try {
-    trackAPICall();
-    const response = await ai.models.generateContent({
-      model: modelId,
-      contents: prompt,
-      config: {
-        responseMimeType: "application/json",
-        responseSchema: {
-          type: Type.ARRAY,
-          items: {
-            type: Type.OBJECT,
-            properties: {
-              type: { type: Type.STRING, enum: ['contradiction', 'ambiguity', 'overlap', 'dependency'] },
-              severity: { type: Type.STRING, enum: ['critical', 'major', 'minor'] },
-              insight1Index: { type: Type.INTEGER },
-              insight2Index: { type: Type.INTEGER },
-              description: { type: Type.STRING },
-              suggestedResolution: { type: Type.STRING },
-              affectedBRDSections: { type: Type.ARRAY, items: { type: Type.STRING } }
-            },
-            required: ['type', 'severity', 'insight1Index', 'insight2Index', 'description', 'suggestedResolution', 'affectedBRDSections']
+    const prompt = `Detect conflicts in these requirements (format: [idx] category|source|summary|detail):
+
+${compactInsights}
+
+Return conflicts array with: type(contradiction/ambiguity/overlap/dependency), severity(critical/major/minor), insight1Index, insight2Index, description(brief), suggestedResolution, affectedBRDSections[]. Return [] if none.`;
+
+    try {
+      trackAPICall();
+      const response = await ai.models.generateContent({
+        model: modelId,
+        contents: prompt,
+        config: {
+          ...FAST_CONFIG,
+          responseMimeType: "application/json",
+          responseSchema: {
+            type: Type.ARRAY,
+            items: {
+              type: Type.OBJECT,
+              properties: {
+                type: { type: Type.STRING, enum: ['contradiction', 'ambiguity', 'overlap', 'dependency'] },
+                severity: { type: Type.STRING, enum: ['critical', 'major', 'minor'] },
+                insight1Index: { type: Type.INTEGER },
+                insight2Index: { type: Type.INTEGER },
+                description: { type: Type.STRING },
+                suggestedResolution: { type: Type.STRING },
+                affectedBRDSections: { type: Type.ARRAY, items: { type: Type.STRING } }
+              },
+              required: ['type', 'severity', 'insight1Index', 'insight2Index', 'description', 'suggestedResolution', 'affectedBRDSections']
+            }
           }
         }
-      }
-    });
+      });
 
-    const text = response.text;
-    if (!text) return [];
-    
-    const rawConflicts = JSON.parse(text);
-    const conflicts: RequirementConflict[] = rawConflicts.map((c: any, idx: number) => {
-      const i1 = approvedInsights[c.insight1Index - 1];
-      const i2 = approvedInsights[c.insight2Index - 1];
-      return {
-        id: `conflict_${Date.now()}_${idx}`,
-        type: c.type,
-        severity: c.severity,
-        insight1: i1 ? { id: i1.id, summary: i1.summary, source: i1.source } : { id: 'unknown', summary: 'Unknown', source: 'Unknown' },
-        insight2: i2 ? { id: i2.id, summary: i2.summary, source: i2.source } : { id: 'unknown', summary: 'Unknown', source: 'Unknown' },
-        description: c.description,
-        suggestedResolution: c.suggestedResolution,
-        affectedBRDSections: c.affectedBRDSections,
-        detectedAt: new Date().toISOString(),
-        status: 'unresolved'
-      };
-    }).filter((c: RequirementConflict) => c.insight1.id !== 'unknown' && c.insight2.id !== 'unknown');
+      const text = response.text;
+      if (!text) return [];
+      
+      const rawConflicts = JSON.parse(text);
+      const conflicts: RequirementConflict[] = rawConflicts.map((c: any, idx: number) => {
+        const i1 = approvedInsights[c.insight1Index - 1];
+        const i2 = approvedInsights[c.insight2Index - 1];
+        return {
+          id: `conflict_${Date.now()}_${idx}`,
+          type: c.type,
+          severity: c.severity,
+          insight1: i1 ? { id: i1.id, summary: i1.summary, source: i1.source } : { id: 'unknown', summary: 'Unknown', source: 'Unknown' },
+          insight2: i2 ? { id: i2.id, summary: i2.summary, source: i2.source } : { id: 'unknown', summary: 'Unknown', source: 'Unknown' },
+          description: c.description,
+          suggestedResolution: c.suggestedResolution,
+          affectedBRDSections: c.affectedBRDSections,
+          detectedAt: new Date().toISOString(),
+          status: 'unresolved'
+        };
+      }).filter((c: RequirementConflict) => c.insight1.id !== 'unknown' && c.insight2.id !== 'unknown');
 
-    setCache(cacheKey, conflicts);
-    return conflicts;
-  } catch (error) {
-    console.error("Conflict Detection Failed:", error);
-    return [];
-  }
+      setCache(cacheKey, conflicts);
+      return conflicts;
+    } catch (error) {
+      console.error("Conflict Detection Failed:", error);
+      return [];
+    }
+  });
 };
 
 // ============================================================================
@@ -721,6 +1014,8 @@ export interface StakeholderSentiment {
   recentTrend: 'improving' | 'stable' | 'declining';
   sourceCount: number;
   lastMentioned: string;
+  // Evidence quotes for drill-down
+  evidenceQuotes?: { text: string; source: string; sentiment: 'positive' | 'negative' | 'neutral' }[];
 }
 
 export interface SentimentReport {
@@ -737,113 +1032,128 @@ export const analyzeStakeholderSentiment = async (
   insights: Insight[],
   sources: { name: string; content?: string; type: string }[]
 ): Promise<SentimentReport> => {
-  const cacheKey = getCacheKey('sentiment', insights.length, sources.length);
+  // IMPROVED: Better cache key using content hash
+  const contentHash = insights.map(i => `${i.id}:${i.summary.slice(0,20)}`).join(',').slice(0, 200);
+  const sourceHash = sources.map(s => s.name).join(',').slice(0, 100);
+  const cacheKey = getCacheKey('sentiment', contentHash, sourceHash, insights.length, Date.now().toString().slice(0, -5));
   const cached = getFromCache<SentimentReport>(cacheKey);
   if (cached) return cached;
 
-  const stakeholderInsights = insights.filter(i => i.category === 'stakeholder' || i.source.toLowerCase().includes('stakeholder'));
-  const allInsightText = insights.map(i => `[${i.source}] ${i.summary}: ${i.detail}`).join('\n');
-  const sourceContent = sources.slice(0, 10).map(s => s.content?.slice(0, 1000) || '').join('\n---\n');
+  // Use deduplication
+  return deduplicateRequest(cacheKey, async () => {
+    // IMPROVED: Process ALL insights, not just first 30
+    const compactInsights = insights.map(i => 
+      `${i.source}|${i.category}|${i.summary}`
+    ).join('\n');
 
-  const prompt = `
-    You are an expert Business Analyst AI specializing in stakeholder analysis and sentiment extraction.
-    
-    Analyze the following project insights and source content to extract stakeholder sentiment:
-    
-    INSIGHTS:
-    ${allInsightText.slice(0, 5000)}
-    
-    SOURCE EXCERPTS:
-    ${sourceContent.slice(0, 5000)}
-    
-    Extract:
-    1. overallProjectSentiment: The general mood/reception of the project
-    2. averageSentimentScore: -100 (very negative) to +100 (very positive)
-    3. stakeholders: Array of identified stakeholders with their sentiment, concerns, supported items
-    4. topConcerns: Most frequently mentioned concerns/issues
-    5. positiveHighlights: Things stakeholders are excited about
-    6. riskAreas: Potential risks based on sentiment patterns
-    
-    Return comprehensive JSON analysis.
-  `;
+    // IMPROVED: Process more source content (up to 8000 chars total instead of 2000)
+    const sourceSnippets = sources.map(s => 
+      s.content?.slice(0, 2000) || ''
+    ).filter(Boolean).join('\n---\n');
 
-  try {
-    trackAPICall();
-    const response = await ai.models.generateContent({
-      model: modelId,
-      contents: prompt,
-      config: {
-        responseMimeType: "application/json",
-        responseSchema: {
-          type: Type.OBJECT,
-          properties: {
-            overallProjectSentiment: { type: Type.STRING, enum: ['positive', 'neutral', 'negative', 'mixed'] },
-            averageSentimentScore: { type: Type.INTEGER },
-            stakeholders: {
-              type: Type.ARRAY,
-              items: {
-                type: Type.OBJECT,
-                properties: {
-                  stakeholder: { type: Type.STRING },
-                  role: { type: Type.STRING },
-                  overallSentiment: { type: Type.STRING, enum: ['positive', 'neutral', 'negative', 'mixed'] },
-                  sentimentScore: { type: Type.INTEGER },
-                  concerns: { type: Type.ARRAY, items: { type: Type.STRING } },
-                  supportedItems: { type: Type.ARRAY, items: { type: Type.STRING } },
-                  engagementLevel: { type: Type.STRING, enum: ['high', 'medium', 'low'] },
-                  recentTrend: { type: Type.STRING, enum: ['improving', 'stable', 'declining'] }
-                },
-                required: ['stakeholder', 'overallSentiment', 'sentimentScore', 'concerns', 'supportedItems', 'engagementLevel', 'recentTrend']
-              }
+    const prompt = `Analyze stakeholder sentiment from these project insights and sources. Extract evidence quotes that support your analysis.
+
+INSIGHTS (source|category|summary):
+${compactInsights}
+
+SOURCES:
+${sourceSnippets.slice(0, 8000)}
+
+Return JSON: overallProjectSentiment, averageSentimentScore(-100 to +100), stakeholders[](stakeholder, role, overallSentiment, sentimentScore, concerns[], supportedItems[], engagementLevel, recentTrend, evidenceQuotes[](text, source, sentiment)), topConcerns[](concern, frequency, stakeholders[]), positiveHighlights[], riskAreas[].
+
+For evidenceQuotes, include actual quotes or paraphrased evidence from the sources that support your sentiment analysis for each stakeholder.`;
+
+    try {
+      trackAPICall();
+      const response = await ai.models.generateContent({
+        model: modelId,
+        contents: prompt,
+        config: {
+          ...FAST_CONFIG,
+          responseMimeType: "application/json",
+          responseSchema: {
+            type: Type.OBJECT,
+            properties: {
+              overallProjectSentiment: { type: Type.STRING, enum: ['positive', 'neutral', 'negative', 'mixed'] },
+              averageSentimentScore: { type: Type.INTEGER },
+              stakeholders: {
+                type: Type.ARRAY,
+                items: {
+                  type: Type.OBJECT,
+                  properties: {
+                    stakeholder: { type: Type.STRING },
+                    role: { type: Type.STRING },
+                    overallSentiment: { type: Type.STRING, enum: ['positive', 'neutral', 'negative', 'mixed'] },
+                    sentimentScore: { type: Type.INTEGER },
+                    concerns: { type: Type.ARRAY, items: { type: Type.STRING } },
+                    supportedItems: { type: Type.ARRAY, items: { type: Type.STRING } },
+                    engagementLevel: { type: Type.STRING, enum: ['high', 'medium', 'low'] },
+                    recentTrend: { type: Type.STRING, enum: ['improving', 'stable', 'declining'] },
+                    evidenceQuotes: {
+                      type: Type.ARRAY,
+                      items: {
+                        type: Type.OBJECT,
+                        properties: {
+                          text: { type: Type.STRING },
+                          source: { type: Type.STRING },
+                          sentiment: { type: Type.STRING, enum: ['positive', 'negative', 'neutral'] }
+                        },
+                        required: ['text', 'source', 'sentiment']
+                      }
+                    }
+                  },
+                  required: ['stakeholder', 'overallSentiment', 'sentimentScore', 'concerns', 'supportedItems', 'engagementLevel', 'recentTrend']
+                }
+              },
+              topConcerns: {
+                type: Type.ARRAY,
+                items: {
+                  type: Type.OBJECT,
+                  properties: {
+                    concern: { type: Type.STRING },
+                    frequency: { type: Type.INTEGER },
+                    stakeholders: { type: Type.ARRAY, items: { type: Type.STRING } }
+                  },
+                  required: ['concern', 'frequency', 'stakeholders']
+                }
+              },
+              positiveHighlights: { type: Type.ARRAY, items: { type: Type.STRING } },
+              riskAreas: { type: Type.ARRAY, items: { type: Type.STRING } }
             },
-            topConcerns: {
-              type: Type.ARRAY,
-              items: {
-                type: Type.OBJECT,
-                properties: {
-                  concern: { type: Type.STRING },
-                  frequency: { type: Type.INTEGER },
-                  stakeholders: { type: Type.ARRAY, items: { type: Type.STRING } }
-                },
-                required: ['concern', 'frequency', 'stakeholders']
-              }
-            },
-            positiveHighlights: { type: Type.ARRAY, items: { type: Type.STRING } },
-            riskAreas: { type: Type.ARRAY, items: { type: Type.STRING } }
-          },
-          required: ['overallProjectSentiment', 'averageSentimentScore', 'stakeholders', 'topConcerns', 'positiveHighlights', 'riskAreas']
+            required: ['overallProjectSentiment', 'averageSentimentScore', 'stakeholders', 'topConcerns', 'positiveHighlights', 'riskAreas']
+          }
         }
-      }
-    });
+      });
 
-    const text = response.text;
-    if (!text) throw new Error("No response");
-    
-    const result = JSON.parse(text);
-    const report: SentimentReport = {
-      ...result,
-      stakeholders: result.stakeholders.map((s: any) => ({
-        ...s,
-        sourceCount: insights.filter(i => i.source.toLowerCase().includes(s.stakeholder.toLowerCase())).length || 1,
-        lastMentioned: new Date().toISOString()
-      })),
-      generatedAt: new Date().toISOString()
-    };
-    
-    setCache(cacheKey, report);
-    return report;
-  } catch (error) {
-    console.error("Sentiment Analysis Failed:", error);
-    return {
-      overallProjectSentiment: 'neutral',
-      averageSentimentScore: 0,
-      stakeholders: [],
-      topConcerns: [],
-      positiveHighlights: [],
-      riskAreas: ['Unable to analyze sentiment - insufficient data'],
-      generatedAt: new Date().toISOString()
-    };
-  }
+      const text = response.text;
+      if (!text) throw new Error("No response");
+      
+      const result = JSON.parse(text);
+      const report: SentimentReport = {
+        ...result,
+        stakeholders: result.stakeholders.map((s: any) => ({
+          ...s,
+          sourceCount: insights.filter(i => i.source.toLowerCase().includes(s.stakeholder.toLowerCase())).length || 1,
+          lastMentioned: new Date().toISOString()
+        })),
+        generatedAt: new Date().toISOString()
+      };
+      
+      setCache(cacheKey, report);
+      return report;
+    } catch (error) {
+      console.error("Sentiment Analysis Failed:", error);
+      return {
+        overallProjectSentiment: 'neutral',
+        averageSentimentScore: 0,
+        stakeholders: [],
+        topConcerns: [],
+        positiveHighlights: [],
+        riskAreas: ['Unable to analyze sentiment - insufficient data'],
+        generatedAt: new Date().toISOString()
+      };
+    }
+  });
 };
 
 // ============================================================================
@@ -877,126 +1187,121 @@ export const generateStatusReport = async (
   brdSections?: { title: string; content: string; confidence: number }[],
   conflicts?: RequirementConflict[]
 ): Promise<StatusReport> => {
-  const cacheKey = getCacheKey('statusReport', project.name, insights.length, brdSections?.length || 0);
+  // Improved cache key with more specificity
+  const conflictCount = conflicts?.length || 0;
+  const cacheKey = getCacheKey('statusReport', project.name, insights.length, brdSections?.length || 0, conflictCount);
   const cached = getFromCache<StatusReport>(cacheKey);
   if (cached) return cached;
 
-  const approvedInsights = insights.filter(i => i.status === 'approved');
-  const pendingInsights = insights.filter(i => i.status === 'pending');
-  const flaggedInsights = insights.filter(i => i.status === 'flagged');
+  // Use deduplication
+  return deduplicateRequest(cacheKey, async () => {
+    const approvedInsights = insights.filter(i => i.status === 'approved');
+    const pendingInsights = insights.filter(i => i.status === 'pending');
+    const flaggedInsights = insights.filter(i => i.status === 'flagged');
+    const avgConfidence = brdSections ? Math.round(brdSections.reduce((a, b) => a + b.confidence, 0) / brdSections.length) : 0;
 
-  const prompt = `
-    You are an expert Project Manager AI generating a professional status report.
-    
-    PROJECT: ${project.name}
-    GOALS: ${project.goals || 'Not specified'}
-    TIMELINE: ${project.timeline || 'Not specified'}
-    STATUS: ${project.status}
-    
-    INSIGHTS SUMMARY:
-    - Total: ${insights.length}
-    - Approved: ${approvedInsights.length}
-    - Pending Review: ${pendingInsights.length}
-    - Flagged Issues: ${flaggedInsights.length}
-    
-    BRD STATUS:
-    ${brdSections ? `Generated with ${brdSections.length} sections. Average confidence: ${Math.round(brdSections.reduce((a, b) => a + b.confidence, 0) / brdSections.length)}%` : 'Not yet generated'}
-    
-    CONFLICTS: ${conflicts?.length || 0} detected
-    ${conflicts?.slice(0, 5).map(c => `- ${c.severity.toUpperCase()}: ${c.description}`).join('\n') || 'None'}
-    
-    Generate a comprehensive, professional status report suitable for executive stakeholders.
-  `;
+    // OPTIMIZED: Compact prompt
+    const prompt = `Generate status report for executive stakeholders.
 
-  try {
-    trackAPICall();
-    const response = await ai.models.generateContent({
-      model: modelId,
-      contents: prompt,
-      config: {
-        responseMimeType: "application/json",
-        responseSchema: {
-          type: Type.OBJECT,
-          properties: {
-            executiveSummary: { type: Type.STRING },
-            progressMetrics: {
-              type: Type.ARRAY,
-              items: {
-                type: Type.OBJECT,
-                properties: {
-                  label: { type: Type.STRING },
-                  current: { type: Type.INTEGER },
-                  target: { type: Type.INTEGER },
-                  status: { type: Type.STRING, enum: ['on-track', 'at-risk', 'delayed'] }
-                },
-                required: ['label', 'current', 'target', 'status']
-              }
+PROJECT: ${project.name} | Status: ${project.status}
+Goals: ${(project.goals || 'TBD').slice(0, 100)} | Timeline: ${project.timeline || 'TBD'}
+Insights: ${approvedInsights.length} approved, ${pendingInsights.length} pending, ${flaggedInsights.length} flagged
+BRD: ${brdSections ? `${brdSections.length} sections, ${avgConfidence}% confidence` : 'Not generated'}
+Conflicts: ${conflictCount}${conflicts?.slice(0, 3).map(c => ` [${c.severity}]`).join('') || ''}
+
+Return JSON: executiveSummary, progressMetrics[](label,current,target,status), keyAccomplishments[], activeRisks[](risk,severity,mitigation), upcomingMilestones[](milestone,dueDate,status), stakeholderUpdates[], actionItems[](item,owner,dueDate,priority), recommendations[], nextSteps[].`;
+
+    try {
+      trackAPICall();
+      const response = await ai.models.generateContent({
+        model: modelId,
+        contents: prompt,
+        config: {
+          ...FAST_CONFIG,
+          responseMimeType: "application/json",
+          responseSchema: {
+            type: Type.OBJECT,
+            properties: {
+              executiveSummary: { type: Type.STRING },
+              progressMetrics: {
+                type: Type.ARRAY,
+                items: {
+                  type: Type.OBJECT,
+                  properties: {
+                    label: { type: Type.STRING },
+                    current: { type: Type.INTEGER },
+                    target: { type: Type.INTEGER },
+                    status: { type: Type.STRING, enum: ['on-track', 'at-risk', 'delayed'] }
+                  },
+                  required: ['label', 'current', 'target', 'status']
+                }
+              },
+              keyAccomplishments: { type: Type.ARRAY, items: { type: Type.STRING } },
+              activeRisks: {
+                type: Type.ARRAY,
+                items: {
+                  type: Type.OBJECT,
+                  properties: {
+                    risk: { type: Type.STRING },
+                    severity: { type: Type.STRING, enum: ['high', 'medium', 'low'] },
+                    mitigation: { type: Type.STRING }
+                  },
+                  required: ['risk', 'severity', 'mitigation']
+                }
+              },
+              upcomingMilestones: {
+                type: Type.ARRAY,
+                items: {
+                  type: Type.OBJECT,
+                  properties: {
+                    milestone: { type: Type.STRING },
+                    dueDate: { type: Type.STRING },
+                    status: { type: Type.STRING, enum: ['pending', 'in-progress', 'completed'] }
+                  },
+                  required: ['milestone', 'dueDate', 'status']
+                }
+              },
+              stakeholderUpdates: { type: Type.ARRAY, items: { type: Type.STRING } },
+              actionItems: {
+                type: Type.ARRAY,
+                items: {
+                  type: Type.OBJECT,
+                  properties: {
+                    item: { type: Type.STRING },
+                    owner: { type: Type.STRING },
+                    dueDate: { type: Type.STRING },
+                    priority: { type: Type.STRING, enum: ['high', 'medium', 'low'] }
+                  },
+                  required: ['item', 'owner', 'dueDate', 'priority']
+                }
+              },
+              recommendations: { type: Type.ARRAY, items: { type: Type.STRING } },
+              nextSteps: { type: Type.ARRAY, items: { type: Type.STRING } }
             },
-            keyAccomplishments: { type: Type.ARRAY, items: { type: Type.STRING } },
-            activeRisks: {
-              type: Type.ARRAY,
-              items: {
-                type: Type.OBJECT,
-                properties: {
-                  risk: { type: Type.STRING },
-                  severity: { type: Type.STRING, enum: ['high', 'medium', 'low'] },
-                  mitigation: { type: Type.STRING }
-                },
-                required: ['risk', 'severity', 'mitigation']
-              }
-            },
-            upcomingMilestones: {
-              type: Type.ARRAY,
-              items: {
-                type: Type.OBJECT,
-                properties: {
-                  milestone: { type: Type.STRING },
-                  dueDate: { type: Type.STRING },
-                  status: { type: Type.STRING, enum: ['pending', 'in-progress', 'completed'] }
-                },
-                required: ['milestone', 'dueDate', 'status']
-              }
-            },
-            stakeholderUpdates: { type: Type.ARRAY, items: { type: Type.STRING } },
-            actionItems: {
-              type: Type.ARRAY,
-              items: {
-                type: Type.OBJECT,
-                properties: {
-                  item: { type: Type.STRING },
-                  owner: { type: Type.STRING },
-                  dueDate: { type: Type.STRING },
-                  priority: { type: Type.STRING, enum: ['high', 'medium', 'low'] }
-                },
-                required: ['item', 'owner', 'dueDate', 'priority']
-              }
-            },
-            recommendations: { type: Type.ARRAY, items: { type: Type.STRING } },
-            nextSteps: { type: Type.ARRAY, items: { type: Type.STRING } }
-          },
-          required: ['executiveSummary', 'progressMetrics', 'keyAccomplishments', 'activeRisks', 'upcomingMilestones', 'actionItems', 'recommendations', 'nextSteps']
+            required: ['executiveSummary', 'progressMetrics', 'keyAccomplishments', 'activeRisks', 'upcomingMilestones', 'actionItems', 'recommendations', 'nextSteps']
+          }
         }
-      }
-    });
+      });
 
-    const text = response.text;
-    if (!text) throw new Error("No response");
-    
-    const result = JSON.parse(text);
-    const report: StatusReport = {
-      id: `report_${Date.now()}`,
-      title: `${project.name} - Status Report`,
-      generatedAt: new Date().toISOString(),
-      period: `Week of ${new Date().toLocaleDateString()}`,
-      ...result
-    };
-    
-    setCache(cacheKey, report);
-    return report;
-  } catch (error) {
-    console.error("Status Report Generation Failed:", error);
-    throw error;
-  }
+      const text = response.text;
+      if (!text) throw new Error("No response");
+      
+      const result = JSON.parse(text);
+      const report: StatusReport = {
+        id: `report_${Date.now()}`,
+        title: `${project.name} - Status Report`,
+        generatedAt: new Date().toISOString(),
+        period: `Week of ${new Date().toLocaleDateString()}`,
+        ...result
+      };
+      
+      setCache(cacheKey, report);
+      return report;
+    } catch (error) {
+      console.error("Status Report Generation Failed:", error);
+      throw error;
+    }
+  });
 };
 
 // ============================================================================
@@ -1017,6 +1322,174 @@ export interface TraceabilityEntry {
   dependencies: string[];
   testCriteria?: string;
 }
+
+// AI-enhanced traceability with dependencies and test criteria
+export const enhanceTraceabilityMatrix = async (
+  insights: Insight[]
+): Promise<{ 
+  dependencies: Record<string, string[]>; 
+  testCriteria: Record<string, string>;
+  stakeholders: Record<string, { name: string; role: string; confidence: number }[]>;
+}> => {
+  const requirements = insights.filter(i => i.category === 'requirement' && (i.status === 'approved' || i.status === 'pending'));
+  if (requirements.length === 0) return { dependencies: {}, testCriteria: {}, stakeholders: {} };
+
+  const cacheKey = getCacheKey('enhanceMatrixV2', requirements.map(r => r.id).sort().join(','));
+  const cached = getFromCache<{ 
+    dependencies: Record<string, string[]>; 
+    testCriteria: Record<string, string>;
+    stakeholders: Record<string, { name: string; role: string; confidence: number }[]>;
+  }>(cacheKey);
+  if (cached) return cached;
+
+  return deduplicateRequest(cacheKey, async () => {
+    const compactReqs = requirements.map((r, idx) => 
+      `[${idx + 1}] ${r.summary.slice(0, 80)}|${r.detail?.slice(0, 100) || ''}`
+    ).join('\n');
+
+    const prompt = `Analyze these requirements for dependencies, test criteria, and stakeholders.
+
+Requirements (format: [idx] summary|detail):
+${compactReqs}
+
+For EACH requirement, analyze:
+1. Dependencies: Which OTHER requirements (by index) must this depend on? (empty if none)
+2. Test Criteria: A specific, measurable acceptance test (Given/When/Then format, 1-2 sentences)
+3. Stakeholders: Who is affected? Extract names/roles from the requirement text with confidence scores.
+
+Return JSON: { requirements: [{ index, dependencies[], testCriteria, stakeholders[{name, role, confidence}] }] }`;
+
+    try {
+      trackAPICall();
+      const response = await ai.models.generateContent({
+        model: modelId,
+        contents: prompt,
+        config: {
+          ...QUICK_CONFIG,
+          responseMimeType: "application/json",
+          responseSchema: {
+            type: Type.OBJECT,
+            properties: {
+              requirements: {
+                type: Type.ARRAY,
+                items: {
+                  type: Type.OBJECT,
+                  properties: {
+                    index: { type: Type.INTEGER },
+                    dependencies: { type: Type.ARRAY, items: { type: Type.INTEGER } },
+                    testCriteria: { type: Type.STRING },
+                    stakeholders: {
+                      type: Type.ARRAY,
+                      items: {
+                        type: Type.OBJECT,
+                        properties: {
+                          name: { type: Type.STRING },
+                          role: { type: Type.STRING },
+                          confidence: { type: Type.INTEGER }
+                        },
+                        required: ['name', 'role', 'confidence']
+                      }
+                    }
+                  },
+                  required: ['index', 'dependencies', 'testCriteria', 'stakeholders']
+                }
+              }
+            },
+            required: ['requirements']
+          }
+        }
+      });
+
+      const text = response.text;
+      if (!text) throw new Error("No response");
+      
+      const result = JSON.parse(text);
+      const deps: Record<string, string[]> = {};
+      const tests: Record<string, string> = {};
+      const stakeholders: Record<string, { name: string; role: string; confidence: number }[]> = {};
+      
+      result.requirements.forEach((r: any) => {
+        const reqId = requirements[r.index - 1]?.id;
+        if (reqId) {
+          deps[reqId] = r.dependencies.map((d: number) => requirements[d - 1]?.id).filter(Boolean);
+          tests[reqId] = r.testCriteria;
+          stakeholders[reqId] = r.stakeholders || [];
+        }
+      });
+
+      const finalResult = { dependencies: deps, testCriteria: tests, stakeholders };
+      setCache(cacheKey, finalResult);
+      return finalResult;
+    } catch (error) {
+      console.error("Matrix Enhancement Failed:", error);
+      return { dependencies: {}, testCriteria: {}, stakeholders: {} };
+    }
+  });
+};
+
+// Generate dependency graph data
+export const generateDependencyGraph = async (
+  insights: Insight[],
+  enhancedData: { dependencies: Record<string, string[]> }
+): Promise<{
+  nodes: { id: string; label: string; category: string; level: number }[];
+  edges: { source: string; target: string; type: string }[];
+}> => {
+  const requirements = insights.filter(i => i.category === 'requirement' && (i.status === 'approved' || i.status === 'pending'));
+  
+  // Build nodes
+  const nodes = requirements.map((r, idx) => ({
+    id: r.id,
+    label: `REQ-${String(idx + 1).padStart(3, '0')}`,
+    category: r.category,
+    level: 0 // Will be calculated
+  }));
+  
+  // Build edges from dependencies
+  const edges: { source: string; target: string; type: string }[] = [];
+  Object.entries(enhancedData.dependencies).forEach(([reqId, deps]) => {
+    deps.forEach(depId => {
+      edges.push({ source: depId, target: reqId, type: 'depends_on' });
+    });
+  });
+  
+  // Calculate levels (topological sort)
+  const inDegree: Record<string, number> = {};
+  nodes.forEach(n => inDegree[n.id] = 0);
+  edges.forEach(e => {
+    if (inDegree[e.target] !== undefined) {
+      inDegree[e.target]++;
+    }
+  });
+  
+  // BFS to assign levels
+  const queue = nodes.filter(n => inDegree[n.id] === 0).map(n => n.id);
+  const levels: Record<string, number> = {};
+  queue.forEach(id => levels[id] = 0);
+  
+  while (queue.length > 0) {
+    const current = queue.shift()!;
+    const currentLevel = levels[current] || 0;
+    
+    edges.filter(e => e.source === current).forEach(e => {
+      const nextLevel = currentLevel + 1;
+      if (levels[e.target] === undefined || levels[e.target] < nextLevel) {
+        levels[e.target] = nextLevel;
+      }
+      inDegree[e.target]--;
+      if (inDegree[e.target] === 0) {
+        queue.push(e.target);
+      }
+    });
+  }
+  
+  // Apply levels to nodes
+  nodes.forEach(n => {
+    n.level = levels[n.id] || 0;
+  });
+  
+  return { nodes, edges };
+};
 
 export const generateTraceabilityMatrix = async (
   insights: Insight[],
@@ -1174,5 +1647,438 @@ export const analyzeSource = async (
       ],
       confidenceBoost: 5
     };
+  }
+};
+
+// ============================================================================
+// ENTERPRISE BRD GENERATION - Advanced Templates & Customization
+// ============================================================================
+
+export type BRDTemplate = 'enterprise' | 'agile' | 'waterfall' | 'lean';
+export type BRDAudience = 'executive' | 'technical' | 'stakeholder' | 'compliance';
+export type BRDTone = 'formal' | 'concise' | 'detailed' | 'technical';
+
+interface BRDGenerationOptions {
+  template: BRDTemplate;
+  audience: BRDAudience;
+  tone: BRDTone;
+}
+
+interface GenerationProgress {
+  current: number;
+  total: number;
+  section: string;
+}
+
+const TEMPLATE_SECTIONS: Record<BRDTemplate, string[]> = {
+  enterprise: [
+    'Executive Summary',
+    'Business Objectives', 
+    'Stakeholder Analysis',
+    'Functional Requirements',
+    'Non-Functional Requirements',
+    'Assumptions & Constraints',
+    'Dependencies & Integrations',
+    'Success Metrics & KPIs',
+    'Timeline & Milestones'
+  ],
+  agile: [
+    'Product Vision',
+    'User Personas',
+    'Epic Overview',
+    'User Stories & Acceptance Criteria',
+    'Technical Considerations',
+    'Definition of Done',
+    'Sprint Planning Considerations',
+    'Success Metrics'
+  ],
+  waterfall: [
+    'Project Overview',
+    'Business Requirements',
+    'Functional Specifications',
+    'Technical Specifications',
+    'System Design Overview',
+    'Testing Strategy',
+    'Implementation Plan',
+    'Training & Documentation',
+    'Maintenance Plan'
+  ],
+  lean: [
+    'Problem Statement',
+    'Solution Hypothesis',
+    'MVP Scope',
+    'Key Features',
+    'Success Criteria',
+    'Risks & Assumptions',
+    'Next Steps'
+  ]
+};
+
+const AUDIENCE_GUIDANCE: Record<BRDAudience, string> = {
+  executive: `
+    - Focus on business value, ROI, and strategic alignment
+    - Use high-level summaries with key metrics
+    - Minimize technical jargon
+    - Emphasize risk mitigation and decision points
+    - Include cost-benefit analysis where applicable`,
+  technical: `
+    - Include detailed technical specifications
+    - Use precise technical terminology
+    - Provide architecture considerations
+    - Include integration details and API specifications
+    - Reference industry standards and best practices`,
+  stakeholder: `
+    - Balance business and technical information
+    - Focus on features and benefits
+    - Clear acceptance criteria
+    - Include user journey considerations
+    - Highlight dependencies and timelines`,
+  compliance: `
+    - Emphasize regulatory requirements
+    - Include audit trail considerations
+    - Detail security and privacy requirements
+    - Reference compliance frameworks (GDPR, SOC2, HIPAA, etc.)
+    - Include risk assessment and mitigation`
+};
+
+const TONE_GUIDANCE: Record<BRDTone, string> = {
+  formal: 'Use professional business language, third person, passive voice where appropriate. Maintain a corporate tone.',
+  concise: 'Be brief and to the point. Use bullet points extensively. Avoid redundancy. Each sentence should add value.',
+  detailed: 'Provide comprehensive explanations. Include examples and rationale. Cover edge cases and considerations.',
+  technical: 'Use precise technical terminology. Include specifications, measurements, and technical requirements.'
+};
+
+export const generateBRDAdvanced = async (
+  project: { name: string; description?: string; goals?: string },
+  insights: Insight[],
+  options: BRDGenerationOptions,
+  onProgress?: (progress: GenerationProgress) => void
+): Promise<Omit<BRDSection, 'id'>[]> => {
+  const { template, audience, tone } = options;
+  const sections = TEMPLATE_SECTIONS[template];
+  const approvedInsights = insights.filter(i => i.status === 'approved');
+  
+  // Categorize insights
+  const requirements = approvedInsights.filter(i => i.category === 'requirement');
+  const decisions = approvedInsights.filter(i => i.category === 'decision');
+  const stakeholders = approvedInsights.filter(i => i.category === 'stakeholder');
+  const timelines = approvedInsights.filter(i => i.category === 'timeline');
+  const questions = approvedInsights.filter(i => i.category === 'question');
+  
+  // Extract unique sources
+  const allSources = [...new Set(approvedInsights.map(i => i.source))];
+  
+  // Calculate average confidence
+  const avgConfidence = approvedInsights.length > 0 
+    ? Math.round(approvedInsights.reduce((sum, i) => sum + (i.confidenceScore || 50), 0) / approvedInsights.length)
+    : 50;
+
+  const prompt = `
+You are a world-class Business Analyst creating an enterprise-grade BRD. Generate a ${template.toUpperCase()} template BRD optimized for a ${audience.toUpperCase()} audience.
+
+═══════════════════════════════════════════════════════════════════════════════
+PROJECT CONTEXT
+═══════════════════════════════════════════════════════════════════════════════
+Project Name: ${project.name}
+Description: ${project.description || "Enterprise software project"}
+Goals: ${project.goals || "Digital transformation and process optimization"}
+
+═══════════════════════════════════════════════════════════════════════════════
+INSIGHTS SUMMARY
+═══════════════════════════════════════════════════════════════════════════════
+Total Approved: ${approvedInsights.length}
+Average Confidence: ${avgConfidence}%
+Sources: ${allSources.slice(0, 10).join(', ')}
+
+By Category:
+- Requirements: ${requirements.length}
+- Decisions: ${decisions.length}
+- Stakeholders: ${stakeholders.length}
+- Timelines: ${timelines.length}
+- Questions: ${questions.length}
+
+Key Insights:
+${approvedInsights.slice(0, 20).map(i => `- [${i.category.toUpperCase()}] ${i.summary} (${i.confidence} confidence, Source: ${i.source})`).join('\n')}
+
+═══════════════════════════════════════════════════════════════════════════════
+TEMPLATE: ${template.toUpperCase()}
+═══════════════════════════════════════════════════════════════════════════════
+Generate exactly these ${sections.length} sections:
+${sections.map((s, i) => `${i + 1}. "${s}"`).join('\n')}
+
+═══════════════════════════════════════════════════════════════════════════════
+AUDIENCE OPTIMIZATION: ${audience.toUpperCase()}
+═══════════════════════════════════════════════════════════════════════════════
+${AUDIENCE_GUIDANCE[audience]}
+
+═══════════════════════════════════════════════════════════════════════════════
+TONE: ${tone.toUpperCase()}
+═══════════════════════════════════════════════════════════════════════════════
+${TONE_GUIDANCE[tone]}
+
+═══════════════════════════════════════════════════════════════════════════════
+OUTPUT REQUIREMENTS
+═══════════════════════════════════════════════════════════════════════════════
+For EACH section provide:
+- title: Exact section title
+- content: Rich Markdown content with proper headings, bullet points, and tables where appropriate
+- sources: Array of source names that informed this section
+- confidence: 0-100 score based on insight coverage
+
+Additional Requirements:
+- Cross-reference insights throughout
+- Mark areas with low confidence or gaps
+- Use ${tone} tone consistently
+- Optimize for ${audience} audience
+- Follow ${template} methodology best practices
+
+Return JSON array of ${sections.length} section objects.
+`;
+
+  try {
+    onProgress?.({ current: 1, total: sections.length, section: 'Initializing AI generation...' });
+    
+    trackAPICall();
+    const response = await ai.models.generateContent({
+      model: modelId,
+      contents: prompt,
+      config: {
+        ...FAST_CONFIG,
+        responseMimeType: "application/json",
+        responseSchema: {
+          type: Type.ARRAY,
+          items: {
+            type: Type.OBJECT,
+            properties: {
+              title: { type: Type.STRING },
+              content: { type: Type.STRING },
+              sources: { type: Type.ARRAY, items: { type: Type.STRING } },
+              confidence: { type: Type.INTEGER }
+            },
+            required: ['title', 'content', 'sources', 'confidence']
+          }
+        }
+      }
+    });
+
+    const text = response.text;
+    if (!text) throw new Error("No response from AI");
+    
+    const result = JSON.parse(text);
+    
+    // Simulate progress through sections
+    for (let i = 0; i < result.length; i++) {
+      onProgress?.({ current: i + 1, total: result.length, section: `Generated: ${result[i].title}` });
+      await new Promise(resolve => setTimeout(resolve, 100)); // Small delay for visual effect
+    }
+    
+    return result;
+  } catch (error) {
+    console.error("Advanced BRD Generation Failed:", error);
+    throw error;
+  }
+};
+
+export const refineBRDSection = async (
+  section: BRDSection,
+  instruction: string,
+  insights: Insight[],
+  options: { audience: BRDAudience; tone: BRDTone }
+): Promise<{ content: string; confidence: number }> => {
+  const approvedInsights = insights.filter(i => i.status === 'approved');
+  
+  const prompt = `
+You are a Senior Business Analyst refining a specific BRD section.
+
+═══════════════════════════════════════════════════════════════════════════════
+CURRENT SECTION
+═══════════════════════════════════════════════════════════════════════════════
+Title: ${section.title}
+Current Content:
+${section.content}
+
+Current Confidence: ${section.confidence}%
+Current Sources: ${section.sources.join(', ')}
+
+═══════════════════════════════════════════════════════════════════════════════
+AVAILABLE INSIGHTS
+═══════════════════════════════════════════════════════════════════════════════
+${approvedInsights.slice(0, 15).map(i => `- [${i.category}] ${i.summary}: ${i.detail}`).join('\n')}
+
+═══════════════════════════════════════════════════════════════════════════════
+REFINEMENT INSTRUCTION
+═══════════════════════════════════════════════════════════════════════════════
+"${instruction}"
+
+═══════════════════════════════════════════════════════════════════════════════
+REQUIREMENTS
+═══════════════════════════════════════════════════════════════════════════════
+- Audience: ${options.audience}
+- Tone: ${options.tone}
+- Maintain the same section title
+- Apply the refinement instruction
+- Reference relevant insights
+- Output only the refined content, formatted in Markdown
+
+Return JSON with 'content' (string) and 'confidence' (integer 0-100).
+`;
+
+  try {
+    trackAPICall();
+    const response = await ai.models.generateContent({
+      model: modelId,
+      contents: prompt,
+      config: {
+        ...FAST_CONFIG, // Use FAST_CONFIG with higher token limit to avoid truncation
+        responseMimeType: "application/json",
+        responseSchema: {
+          type: Type.OBJECT,
+          properties: {
+            content: { type: Type.STRING },
+            confidence: { type: Type.INTEGER }
+          },
+          required: ['content', 'confidence']
+        }
+      }
+    });
+
+    const text = response.text;
+    if (!text) throw new Error("No response from AI");
+    
+    // Robust JSON parsing with fallback
+    try {
+      return JSON.parse(text);
+    } catch (parseError) {
+      console.warn("JSON parse failed, attempting to repair:", parseError);
+      
+      // Try to extract JSON from response if it has extra text
+      const jsonMatch = text.match(/\{[\s\S]*\}/);
+      if (jsonMatch) {
+        try {
+          return JSON.parse(jsonMatch[0]);
+        } catch {
+          // Ignore secondary parse error
+        }
+      }
+      
+      // Fallback: return original content with maintenance confidence
+      console.warn("Using fallback response for section refinement");
+      return {
+        content: section.content,
+        confidence: Math.max(section.confidence - 5, 30)
+      };
+    }
+  } catch (error) {
+    console.error("Section Refinement Failed:", error);
+    throw error;
+  }
+};
+
+export interface GapAnalysisItem {
+  area: string;
+  severity: 'critical' | 'major' | 'minor';
+  description: string;
+  recommendation: string;
+  affectedSections: string[];
+}
+
+export const analyzeGaps = async (
+  sections: BRDSection[],
+  insights: Insight[],
+  template: BRDTemplate
+): Promise<GapAnalysisItem[]> => {
+  const approvedInsights = insights.filter(i => i.status === 'approved');
+  const expectedSections = TEMPLATE_SECTIONS[template];
+  
+  const prompt = `
+You are a BRD Quality Auditor performing gap analysis on a Business Requirements Document.
+
+═══════════════════════════════════════════════════════════════════════════════
+BRD CONTENT SUMMARY
+═══════════════════════════════════════════════════════════════════════════════
+Template: ${template}
+Sections Present: ${sections.length}
+Expected Sections: ${expectedSections.length}
+
+Sections Overview:
+${sections.map(s => `- ${s.title} (${s.confidence}% confidence, ${s.sources.length} sources)`).join('\n')}
+
+Low Confidence Sections (< 60%):
+${sections.filter(s => s.confidence < 60).map(s => `- ${s.title}: ${s.confidence}%`).join('\n') || 'None'}
+
+═══════════════════════════════════════════════════════════════════════════════
+INSIGHT COVERAGE
+═══════════════════════════════════════════════════════════════════════════════
+Total Approved Insights: ${approvedInsights.length}
+
+By Category:
+- Requirements: ${approvedInsights.filter(i => i.category === 'requirement').length}
+- Decisions: ${approvedInsights.filter(i => i.category === 'decision').length}
+- Stakeholders: ${approvedInsights.filter(i => i.category === 'stakeholder').length}
+- Timelines: ${approvedInsights.filter(i => i.category === 'timeline').length}
+- Questions/Open Items: ${approvedInsights.filter(i => i.category === 'question').length}
+
+Conflicting Insights: ${approvedInsights.filter(i => i.hasConflicts).length}
+
+═══════════════════════════════════════════════════════════════════════════════
+BRD BEST PRACTICES CHECKLIST
+═══════════════════════════════════════════════════════════════════════════════
+Check for these common gaps:
+1. Missing or vague success criteria
+2. Undefined stakeholder roles
+3. No acceptance criteria for requirements
+4. Missing security/compliance requirements
+5. Unclear timelines or milestones
+6. No risk/assumption documentation
+7. Missing dependencies
+8. Lack of testability criteria
+9. No prioritization (MoSCoW)
+10. Unresolved conflicts or open questions
+
+═══════════════════════════════════════════════════════════════════════════════
+ANALYSIS REQUIRED
+═══════════════════════════════════════════════════════════════════════════════
+Identify 3-7 gaps in this BRD with:
+- area: The gap area name
+- severity: 'critical' (blocks project), 'major' (significant risk), 'minor' (improvement opportunity)
+- description: What is missing or problematic
+- recommendation: Specific action to address the gap
+- affectedSections: Array of section titles affected
+
+Return JSON array of gap objects. If no significant gaps, return empty array.
+`;
+
+  try {
+    trackAPICall();
+    const response = await ai.models.generateContent({
+      model: modelId,
+      contents: prompt,
+      config: {
+        ...QUICK_CONFIG,
+        responseMimeType: "application/json",
+        responseSchema: {
+          type: Type.ARRAY,
+          items: {
+            type: Type.OBJECT,
+            properties: {
+              area: { type: Type.STRING },
+              severity: { type: Type.STRING, enum: ['critical', 'major', 'minor'] },
+              description: { type: Type.STRING },
+              recommendation: { type: Type.STRING },
+              affectedSections: { type: Type.ARRAY, items: { type: Type.STRING } }
+            },
+            required: ['area', 'severity', 'description', 'recommendation', 'affectedSections']
+          }
+        }
+      }
+    });
+
+    const text = response.text;
+    if (!text) throw new Error("No response from AI");
+    
+    return JSON.parse(text);
+  } catch (error) {
+    console.error("Gap Analysis Failed:", error);
+    return [];
   }
 };

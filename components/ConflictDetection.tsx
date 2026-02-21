@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import { 
   AlertTriangle, 
   CheckCircle2, 
@@ -23,13 +23,41 @@ import {
   Trash2,
   Merge,
   Edit3,
-  Check
+  Check,
+  History,
+  Undo2,
+  CheckSquare,
+  Square,
+  RotateCcw,
+  Play,
+  Pause
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import Button from './Button';
 import Tooltip from './Tooltip';
 import { ProjectState, Insight, updateProjectContext } from '../utils/db';
 import { detectConflicts, RequirementConflict, generateConflictResolution, ConflictResolutionAction } from '../utils/services/ai';
+import { streamConflictDetection, StreamingConflict } from '../utils/services/streaming';
+
+// Conflict History Entry
+interface ConflictHistoryEntry {
+  id: string;
+  timestamp: string;
+  action: 'detected' | 'resolved' | 'deferred' | 'undo' | 'auto_resolved';
+  conflictId: string;
+  conflictDescription: string;
+  previousState?: RequirementConflict;
+  newState?: RequirementConflict;
+  actionDetails?: string;
+}
+
+// Undo action state
+interface UndoState {
+  conflicts: RequirementConflict[];
+  insights: Insight[];
+  timestamp: string;
+  description: string;
+}
 
 interface ConflictDetectionProps {
   project: ProjectState;
@@ -69,6 +97,33 @@ const ConflictDetection: React.FC<ConflictDetectionProps> = ({
   const [solvingConflictId, setSolvingConflictId] = useState<string | null>(null);
   const [pendingAction, setPendingAction] = useState<ConflictResolutionAction | null>(null);
   const [showActionPreview, setShowActionPreview] = useState<string | null>(null);
+  const [autoDetectEnabled, setAutoDetectEnabled] = useState(true);
+  const [selectedConflicts, setSelectedConflicts] = useState<Set<string>>(new Set());
+  const [analysisProgress, setAnalysisProgress] = useState(0);
+  const [progressMessage, setProgressMessage] = useState('');
+  
+  // === NEW: Streaming state ===
+  const [isStreaming, setIsStreaming] = useState(false);
+  const [streamingConflicts, setStreamingConflicts] = useState<RequirementConflict[]>([]);
+  const abortStreamRef = useRef(false);
+  
+  // === NEW: Conflict History / Audit Trail ===
+  const [conflictHistory, setConflictHistory] = useState<ConflictHistoryEntry[]>([]);
+  const [showHistory, setShowHistory] = useState(false);
+  
+  // === NEW: Undo state stack ===
+  const [undoStack, setUndoStack] = useState<UndoState[]>([]);
+  const MAX_UNDO_STACK = 10;
+  
+  // === NEW: Batch operations state ===
+  const [batchMode, setBatchMode] = useState(false);
+  const [batchProcessing, setBatchProcessing] = useState(false);
+
+  // Track insight changes for auto-detection
+  const insightHash = useMemo(() => 
+    project.insights?.map(i => i.id + i.status).join(',') || '',
+    [project.insights]
+  );
 
   // Load conflicts from project state or run analysis
   useEffect(() => {
@@ -82,6 +137,187 @@ const ConflictDetection: React.FC<ConflictDetectionProps> = ({
     }
   }, [project]);
 
+  // Auto-detect conflicts when insights change (if enabled and not already analyzing)
+  const prevInsightHashRef = React.useRef(insightHash);
+  useEffect(() => {
+    if (
+      autoDetectEnabled &&
+      insightHash !== prevInsightHashRef.current &&
+      project.insights?.length >= 2 &&
+      !isAnalyzing
+    ) {
+      prevInsightHashRef.current = insightHash;
+      // Debounce auto-detection
+      const timer = setTimeout(() => {
+        handleStreamingAnalyze();
+      }, 2000); // Wait 2 seconds after changes
+      return () => clearTimeout(timer);
+    }
+  }, [insightHash, autoDetectEnabled, isAnalyzing]);
+
+  // Load conflict history from project state
+  useEffect(() => {
+    const savedHistory = (project as any).conflictHistory;
+    if (savedHistory && Array.isArray(savedHistory)) {
+      setConflictHistory(savedHistory);
+    }
+  }, [project]);
+
+  // === NEW: Add to history function ===
+  const addToHistory = useCallback((entry: Omit<ConflictHistoryEntry, 'id' | 'timestamp'>) => {
+    const newEntry: ConflictHistoryEntry = {
+      ...entry,
+      id: `hist_${Date.now()}`,
+      timestamp: new Date().toISOString()
+    };
+    setConflictHistory(prev => {
+      const updated = [newEntry, ...prev].slice(0, 100); // Keep last 100 entries
+      // Persist to project state
+      updateProjectContext({
+        ...project,
+        conflictHistory: updated
+      } as any).catch(console.error);
+      return updated;
+    });
+  }, [project]);
+
+  // === NEW: Push to undo stack ===
+  const pushUndoState = useCallback((description: string) => {
+    const state: UndoState = {
+      conflicts: [...conflicts],
+      insights: [...(project.insights || [])],
+      timestamp: new Date().toISOString(),
+      description
+    };
+    setUndoStack(prev => [state, ...prev].slice(0, MAX_UNDO_STACK));
+  }, [conflicts, project.insights]);
+
+  // === NEW: Undo last action ===
+  const handleUndo = useCallback(async () => {
+    if (undoStack.length === 0) return;
+    
+    const [lastState, ...remaining] = undoStack;
+    setUndoStack(remaining);
+    
+    // Restore state
+    setConflicts(lastState.conflicts);
+    
+    // Update project with restored insights
+    const updated = await updateProjectContext({
+      ...project,
+      insights: lastState.insights,
+      conflicts: lastState.conflicts
+    } as any);
+    onUpdate(updated);
+    
+    addToHistory({
+      action: 'undo',
+      conflictId: 'all',
+      conflictDescription: `Undid: ${lastState.description}`,
+      actionDetails: `Restored state from ${new Date(lastState.timestamp).toLocaleTimeString()}`
+    });
+  }, [undoStack, project, onUpdate, addToHistory]);
+
+  // === NEW: Streaming analysis handler ===
+  const handleStreamingAnalyze = useCallback(async () => {
+    if (!project.insights || project.insights.length < 2) {
+      setError('Need at least 2 insights to detect conflicts');
+      return;
+    }
+
+    setIsStreaming(true);
+    setIsAnalyzing(true);
+    setError(null);
+    setStreamingConflicts([]);
+    setAnalysisProgress(0);
+    setProgressMessage('Starting analysis...');
+    abortStreamRef.current = false;
+
+    const insights = project.insights.map(i => ({
+      id: i.id,
+      category: i.category,
+      source: i.source,
+      summary: i.summary,
+      detail: i.detail
+    }));
+
+    try {
+      await streamConflictDetection(
+        insights,
+        // On each conflict detected
+        (streamConflict, index) => {
+          if (abortStreamRef.current) return;
+          
+          const i1 = project.insights[streamConflict.insight1Index - 1];
+          const i2 = project.insights[streamConflict.insight2Index - 1];
+          
+          if (i1 && i2) {
+            const fullConflict: RequirementConflict = {
+              id: `conflict_${Date.now()}_${index}`,
+              type: streamConflict.type,
+              severity: streamConflict.severity,
+              insight1: { id: i1.id, summary: i1.summary, source: i1.source },
+              insight2: { id: i2.id, summary: i2.summary, source: i2.source },
+              description: streamConflict.description,
+              suggestedResolution: streamConflict.suggestedResolution,
+              affectedBRDSections: ['Functional Requirements'],
+              detectedAt: new Date().toISOString(),
+              status: 'unresolved'
+            };
+            
+            setStreamingConflicts(prev => [...prev, fullConflict]);
+            
+            // Add to history
+            addToHistory({
+              action: 'detected',
+              conflictId: fullConflict.id,
+              conflictDescription: fullConflict.description,
+              newState: fullConflict
+            });
+          }
+        },
+        // Progress callback
+        (progress, message) => {
+          if (abortStreamRef.current) return;
+          setAnalysisProgress(progress);
+          setProgressMessage(message);
+        },
+        // On complete
+        () => {
+          setIsStreaming(false);
+          setLastAnalyzed(new Date());
+        }
+      );
+      
+      // Finalize conflicts
+      setConflicts(prev => {
+        const allConflicts = [...streamingConflicts];
+        // Save to project state
+        updateProjectContext({
+          ...project,
+          conflicts: allConflicts,
+          conflictsAnalyzedAt: new Date().toISOString()
+        } as any).then(onUpdate);
+        return allConflicts;
+      });
+    } catch (err) {
+      console.error('Streaming conflict detection failed:', err);
+      setError('Analysis failed. Please try again.');
+    } finally {
+      setIsAnalyzing(false);
+      setIsStreaming(false);
+    }
+  }, [project, addToHistory, onUpdate]);
+
+  // === Abort streaming ===
+  const handleAbortStreaming = useCallback(() => {
+    abortStreamRef.current = true;
+    setIsStreaming(false);
+    setIsAnalyzing(false);
+    // Keep any conflicts found so far
+    setConflicts(streamingConflicts);
+  }, [streamingConflicts]);
+
   const handleAnalyze = async () => {
     if (!project.insights || project.insights.length < 2) {
       setError('Need at least 2 insights to detect conflicts');
@@ -90,9 +326,17 @@ const ConflictDetection: React.FC<ConflictDetectionProps> = ({
 
     setIsAnalyzing(true);
     setError(null);
+    setAnalysisProgress(0);
+
+    // Simulate progress for better UX
+    const progressInterval = setInterval(() => {
+      setAnalysisProgress(prev => Math.min(prev + 10, 90));
+    }, 300);
 
     try {
       const detected = await detectConflicts(project.insights);
+      setAnalysisProgress(100);
+      clearInterval(progressInterval);
       setConflicts(detected);
       setLastAnalyzed(new Date());
       
@@ -112,10 +356,25 @@ const ConflictDetection: React.FC<ConflictDetectionProps> = ({
   };
 
   const handleResolveConflict = async (conflictId: string, resolution: 'resolved' | 'deferred') => {
+    // Push current state for undo
+    pushUndoState(`Marked conflict as ${resolution}`);
+    
+    const conflict = conflicts.find(c => c.id === conflictId);
     const updatedConflicts = conflicts.map(c => 
       c.id === conflictId ? { ...c, status: resolution } : c
     );
     setConflicts(updatedConflicts);
+    
+    // Add to history
+    if (conflict) {
+      addToHistory({
+        action: resolution === 'resolved' ? 'resolved' : 'deferred',
+        conflictId,
+        conflictDescription: conflict.description,
+        previousState: conflict,
+        newState: { ...conflict, status: resolution }
+      });
+    }
     
     // Save to project state
     const updated = await updateProjectContext({
@@ -123,6 +382,148 @@ const ConflictDetection: React.FC<ConflictDetectionProps> = ({
       conflicts: updatedConflicts
     } as any);
     onUpdate(updated);
+  };
+
+  // === NEW: Batch resolve selected conflicts ===
+  const handleBatchResolve = async (resolution: 'resolved' | 'deferred') => {
+    if (selectedConflicts.size === 0) return;
+    
+    setBatchProcessing(true);
+    pushUndoState(`Batch ${resolution} ${selectedConflicts.size} conflicts`);
+    
+    const updatedConflicts = conflicts.map(c => 
+      selectedConflicts.has(c.id) ? { ...c, status: resolution } : c
+    );
+    setConflicts(updatedConflicts);
+    
+    // Add history entries for each
+    selectedConflicts.forEach(conflictId => {
+      const conflict = conflicts.find(c => c.id === conflictId);
+      if (conflict) {
+        addToHistory({
+          action: resolution === 'resolved' ? 'resolved' : 'deferred',
+          conflictId,
+          conflictDescription: conflict.description,
+          actionDetails: 'Batch operation'
+        });
+      }
+    });
+    
+    // Save to project state
+    const updated = await updateProjectContext({
+      ...project,
+      conflicts: updatedConflicts
+    } as any);
+    onUpdate(updated);
+    
+    setSelectedConflicts(new Set());
+    setBatchProcessing(false);
+    setBatchMode(false);
+  };
+
+  // === NEW: Batch auto-solve selected conflicts ===
+  const handleBatchAutoSolve = async () => {
+    if (selectedConflicts.size === 0) return;
+    
+    setBatchProcessing(true);
+    pushUndoState(`Batch auto-solve ${selectedConflicts.size} conflicts`);
+    
+    const selectedIds = Array.from(selectedConflicts);
+    let updatedInsights = [...project.insights];
+    let updatedConflicts = [...conflicts];
+    
+    for (const conflictId of selectedIds) {
+      const conflict = conflicts.find(c => c.id === conflictId);
+      if (!conflict || conflict.status !== 'unresolved') continue;
+      
+      const insight1 = project.insights.find(i => i.id === conflict.insight1.id);
+      const insight2 = project.insights.find(i => i.id === conflict.insight2.id);
+      
+      if (!insight1 || !insight2) continue;
+      
+      try {
+        const action = await generateConflictResolution(conflict, insight1, insight2);
+        
+        // Apply action
+        switch (action.actionType) {
+          case 'delete_insight':
+            updatedInsights = updatedInsights.filter(i => i.id !== action.targetInsightId);
+            break;
+          case 'merge_insights':
+            if (action.mergedInsight) {
+              updatedInsights = updatedInsights.map(i => {
+                if (i.id === action.mergedInsight?.id) {
+                  return { ...i, ...action.mergedInsight };
+                }
+                return i;
+              });
+              updatedInsights = updatedInsights.filter(i => i.id !== action.targetInsightId);
+            }
+            break;
+          case 'edit_insight':
+            if (action.editedContent) {
+              updatedInsights = updatedInsights.map(i => {
+                if (i.id === action.targetInsightId) {
+                  return { 
+                    ...i, 
+                    summary: action.editedContent!.summary,
+                    detail: action.editedContent!.detail
+                  };
+                }
+                return i;
+              });
+            }
+            break;
+        }
+        
+        // Mark conflict as resolved
+        updatedConflicts = updatedConflicts.map(c => 
+          c.id === conflictId ? { ...c, status: 'resolved' as const } : c
+        );
+        
+        addToHistory({
+          action: 'auto_resolved',
+          conflictId,
+          conflictDescription: conflict.description,
+          actionDetails: `Auto-resolved with: ${action.actionType}`
+        });
+      } catch (err) {
+        console.error(`Failed to auto-solve conflict ${conflictId}:`, err);
+      }
+    }
+    
+    setConflicts(updatedConflicts);
+    
+    // Save to project state
+    const updated = await updateProjectContext({
+      ...project,
+      insights: updatedInsights,
+      conflicts: updatedConflicts
+    } as any);
+    onUpdate(updated);
+    
+    setSelectedConflicts(new Set());
+    setBatchProcessing(false);
+    setBatchMode(false);
+  };
+
+  // Toggle conflict selection
+  const toggleConflictSelection = (conflictId: string) => {
+    setSelectedConflicts(prev => {
+      const next = new Set(prev);
+      if (next.has(conflictId)) {
+        next.delete(conflictId);
+      } else {
+        next.add(conflictId);
+      }
+      return next;
+    });
+  };
+
+  // Select all unresolved conflicts
+  const selectAllUnresolved = () => {
+    const unresolved = conflicts.filter(c => c.status === 'unresolved').map(c => c.id);
+    setSelectedConflicts(new Set(unresolved));
   };
 
   // Generate AI resolution action for preview
@@ -156,6 +557,9 @@ const ConflictDetection: React.FC<ConflictDetectionProps> = ({
   const handleApplySolution = async (conflict: RequirementConflict, action: ConflictResolutionAction) => {
     setSolvingConflictId(conflict.id);
     setError(null);
+    
+    // Push current state for undo
+    pushUndoState(`Applied ${action.actionType} to resolve conflict`);
 
     try {
       let updatedInsights = [...project.insights];
@@ -206,6 +610,16 @@ const ConflictDetection: React.FC<ConflictDetectionProps> = ({
         c.id === conflict.id ? { ...c, status: 'resolved' as const } : c
       );
       setConflicts(updatedConflicts);
+      
+      // Add to history
+      addToHistory({
+        action: 'auto_resolved',
+        conflictId: conflict.id,
+        conflictDescription: conflict.description,
+        previousState: conflict,
+        newState: { ...conflict, status: 'resolved' as const },
+        actionDetails: `Applied: ${action.actionType} - ${action.explanation}`
+      });
 
       // Save to project state
       const updated = await updateProjectContext({
@@ -267,14 +681,19 @@ const ConflictDetection: React.FC<ConflictDetectionProps> = ({
     });
   }, [conflicts, filterSeverity, filterType, filterStatus, searchQuery]);
 
-  const stats = useMemo(() => ({
-    total: conflicts.length,
-    critical: conflicts.filter(c => c.severity === 'critical').length,
-    major: conflicts.filter(c => c.severity === 'major').length,
-    minor: conflicts.filter(c => c.severity === 'minor').length,
-    unresolved: conflicts.filter(c => c.status === 'unresolved').length,
-    resolved: conflicts.filter(c => c.status === 'resolved').length
-  }), [conflicts]);
+  const stats = useMemo(() => {
+    // Combine existing and streaming conflicts for stats
+    const allConflicts = isStreaming ? [...conflicts, ...streamingConflicts] : conflicts;
+    return {
+      total: allConflicts.length,
+      critical: allConflicts.filter(c => c.severity === 'critical').length,
+      major: allConflicts.filter(c => c.severity === 'major').length,
+      minor: allConflicts.filter(c => c.severity === 'minor').length,
+      unresolved: allConflicts.filter(c => c.status === 'unresolved').length,
+      resolved: allConflicts.filter(c => c.status === 'resolved').length,
+      selected: selectedConflicts.size
+    };
+  }, [conflicts, streamingConflicts, isStreaming, selectedConflicts]);
 
   // Empty state - no insights yet
   if (!project.insights || project.insights.length < 2) {
@@ -311,26 +730,97 @@ const ConflictDetection: React.FC<ConflictDetectionProps> = ({
             </p>
           </div>
           <div className="flex items-center gap-3">
+            {/* Undo Button */}
+            {undoStack.length > 0 && (
+              <Tooltip content={`Undo: ${undoStack[0]?.description}`}>
+                <button
+                  onClick={handleUndo}
+                  className="flex items-center gap-2 px-3 py-2 rounded-xl text-sm font-medium bg-slate-100 text-slate-600 hover:bg-slate-200 transition-colors"
+                >
+                  <Undo2 className="h-4 w-4" />
+                  <span className="hidden md:inline">Undo</span>
+                </button>
+              </Tooltip>
+            )}
+            
+            {/* History Toggle */}
+            <Tooltip content="View conflict history">
+              <button
+                onClick={() => setShowHistory(!showHistory)}
+                className={`flex items-center gap-2 px-3 py-2 rounded-xl text-sm font-medium transition-colors ${
+                  showHistory 
+                    ? 'bg-blue-50 text-blue-700 border border-blue-200' 
+                    : 'bg-slate-100 text-slate-500'
+                }`}
+              >
+                <History className="h-4 w-4" />
+                <span className="hidden md:inline">{conflictHistory.length}</span>
+              </button>
+            </Tooltip>
+            
+            {/* Batch Mode Toggle */}
+            <Tooltip content={batchMode ? 'Exit batch mode' : 'Batch operations'}>
+              <button
+                onClick={() => {
+                  setBatchMode(!batchMode);
+                  if (!batchMode) setSelectedConflicts(new Set());
+                }}
+                className={`flex items-center gap-2 px-3 py-2 rounded-xl text-sm font-medium transition-colors ${
+                  batchMode 
+                    ? 'bg-purple-50 text-purple-700 border border-purple-200' 
+                    : 'bg-slate-100 text-slate-500'
+                }`}
+              >
+                <CheckSquare className="h-4 w-4" />
+                <span className="hidden md:inline">Batch</span>
+              </button>
+            </Tooltip>
+            
+            {/* Auto-detect Toggle */}
+            <Tooltip content={autoDetectEnabled ? 'Auto-detection enabled' : 'Auto-detection disabled'}>
+              <button
+                onClick={() => setAutoDetectEnabled(!autoDetectEnabled)}
+                className={`flex items-center gap-2 px-3 py-2 rounded-xl text-sm font-medium transition-colors ${
+                  autoDetectEnabled 
+                    ? 'bg-emerald-50 text-emerald-700 border border-emerald-200' 
+                    : 'bg-slate-100 text-slate-500'
+                }`}
+              >
+                <Zap className={`h-4 w-4 ${autoDetectEnabled ? 'text-emerald-600' : ''}`} />
+                Auto
+              </button>
+            </Tooltip>
             {lastAnalyzed && (
-              <span className="text-xs text-slate-500">
+              <span className="text-xs text-slate-500 hidden lg:inline">
                 Last analyzed: {lastAnalyzed.toLocaleTimeString()}
               </span>
             )}
-            <Button 
-              onClick={handleAnalyze}
-              disabled={isAnalyzing}
-              className="shadow-lg shadow-orange-500/20"
-            >
-              {isAnalyzing ? (
-                <>
-                  <Loader className="h-4 w-4 mr-2 animate-spin" /> Analyzing...
-                </>
-              ) : (
-                <>
-                  <RefreshCw className="h-4 w-4 mr-2" /> {conflicts.length > 0 ? 'Re-Analyze' : 'Detect Conflicts'}
-                </>
-              )}
-            </Button>
+            
+            {/* Main Analyze Button with Streaming Support */}
+            {isStreaming ? (
+              <Button 
+                onClick={handleAbortStreaming}
+                className="bg-red-600 hover:bg-red-700"
+              >
+                <Pause className="h-4 w-4 mr-2" /> Stop
+              </Button>
+            ) : (
+              <Button 
+                onClick={handleStreamingAnalyze}
+                disabled={isAnalyzing}
+                className="shadow-lg shadow-orange-500/20"
+              >
+                {isAnalyzing ? (
+                  <>
+                    <Loader className="h-4 w-4 mr-2 animate-spin" /> Analyzing...
+                  </>
+                ) : (
+                  <>
+                    <Play className="h-4 w-4 mr-2" /> {conflicts.length > 0 ? 'Re-Analyze' : 'Detect Conflicts'}
+                  </>
+                )}
+              </Button>
+            )}
           </div>
         </div>
 
@@ -361,6 +851,124 @@ const ConflictDetection: React.FC<ConflictDetectionProps> = ({
             <div className="text-xs text-emerald-600 font-medium uppercase tracking-wider">Resolved</div>
           </div>
         </div>
+        
+        {/* Batch Operations Bar */}
+        {batchMode && (
+          <motion.div 
+            initial={{ opacity: 0, y: -10 }}
+            animate={{ opacity: 1, y: 0 }}
+            className="mb-6 p-4 bg-purple-50 rounded-2xl border border-purple-200 flex flex-wrap items-center gap-4"
+          >
+            <div className="flex items-center gap-2">
+              <CheckSquare className="h-5 w-5 text-purple-600" />
+              <span className="font-medium text-purple-900">
+                {stats.selected} selected
+              </span>
+            </div>
+            <div className="flex items-center gap-2">
+              <button
+                onClick={selectAllUnresolved}
+                className="px-3 py-1.5 text-sm font-medium text-purple-700 hover:bg-purple-100 rounded-lg transition-colors"
+              >
+                Select all unresolved
+              </button>
+              <button
+                onClick={() => setSelectedConflicts(new Set())}
+                className="px-3 py-1.5 text-sm font-medium text-purple-700 hover:bg-purple-100 rounded-lg transition-colors"
+              >
+                Clear selection
+              </button>
+            </div>
+            <div className="flex-1" />
+            <div className="flex items-center gap-2">
+              <Button
+                onClick={() => handleBatchResolve('resolved')}
+                disabled={batchProcessing || stats.selected === 0}
+                className="bg-emerald-600 hover:bg-emerald-700"
+                size="sm"
+              >
+                {batchProcessing ? <Loader className="h-4 w-4 animate-spin" /> : <CheckCircle2 className="h-4 w-4 mr-1" />}
+                Resolve All
+              </Button>
+              <Button
+                onClick={() => handleBatchResolve('deferred')}
+                disabled={batchProcessing || stats.selected === 0}
+                variant="outline"
+                size="sm"
+              >
+                <Clock className="h-4 w-4 mr-1" /> Defer All
+              </Button>
+              <Button
+                onClick={handleBatchAutoSolve}
+                disabled={batchProcessing || stats.selected === 0}
+                className="bg-violet-600 hover:bg-violet-700"
+                size="sm"
+              >
+                {batchProcessing ? <Loader className="h-4 w-4 animate-spin" /> : <Wand2 className="h-4 w-4 mr-1" />}
+                Auto-Solve All
+              </Button>
+            </div>
+          </motion.div>
+        )}
+        
+        {/* History Panel */}
+        <AnimatePresence>
+          {showHistory && (
+            <motion.div
+              initial={{ opacity: 0, height: 0 }}
+              animate={{ opacity: 1, height: 'auto' }}
+              exit={{ opacity: 0, height: 0 }}
+              className="mb-6 bg-slate-50 rounded-2xl border border-slate-200 overflow-hidden"
+            >
+              <div className="p-4 border-b border-slate-200 flex items-center justify-between">
+                <h3 className="font-bold text-slate-900 flex items-center gap-2">
+                  <History className="h-5 w-5" /> Conflict History
+                </h3>
+                <span className="text-xs text-slate-500">{conflictHistory.length} entries</span>
+              </div>
+              <div className="max-h-64 overflow-y-auto">
+                {conflictHistory.length === 0 ? (
+                  <div className="p-8 text-center text-slate-500">
+                    No history yet
+                  </div>
+                ) : (
+                  <div className="divide-y divide-slate-100">
+                    {conflictHistory.slice(0, 20).map(entry => (
+                      <div key={entry.id} className="p-3 hover:bg-white transition-colors">
+                        <div className="flex items-start gap-3">
+                          <div className={`p-1.5 rounded-lg ${
+                            entry.action === 'detected' ? 'bg-orange-100 text-orange-600' :
+                            entry.action === 'resolved' ? 'bg-emerald-100 text-emerald-600' :
+                            entry.action === 'auto_resolved' ? 'bg-violet-100 text-violet-600' :
+                            entry.action === 'undo' ? 'bg-blue-100 text-blue-600' :
+                            'bg-slate-100 text-slate-600'
+                          }`}>
+                            {entry.action === 'detected' && <AlertTriangle className="h-4 w-4" />}
+                            {entry.action === 'resolved' && <CheckCircle2 className="h-4 w-4" />}
+                            {entry.action === 'auto_resolved' && <Wand2 className="h-4 w-4" />}
+                            {entry.action === 'deferred' && <Clock className="h-4 w-4" />}
+                            {entry.action === 'undo' && <RotateCcw className="h-4 w-4" />}
+                          </div>
+                          <div className="flex-1 min-w-0">
+                            <p className="text-sm font-medium text-slate-900 truncate">
+                              {entry.conflictDescription}
+                            </p>
+                            {entry.actionDetails && (
+                              <p className="text-xs text-slate-500 truncate">{entry.actionDetails}</p>
+                            )}
+                          </div>
+                          <span className="text-xs text-slate-400">
+                            {new Date(entry.timestamp).toLocaleTimeString()}
+                          </span>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </motion.div>
+          )}
+        </AnimatePresence>
 
         {/* Filters */}
         <div className="space-y-3 lg:space-y-0 lg:flex lg:flex-wrap items-center gap-3 bg-white p-3 lg:p-4 rounded-xl lg:rounded-2xl border border-slate-100 shadow-sm">
@@ -418,14 +1026,92 @@ const ConflictDetection: React.FC<ConflictDetectionProps> = ({
         </div>
       )}
 
-      {/* Loading State */}
-      {isAnalyzing && conflicts.length === 0 && (
+      {/* Loading State with Streaming Progress */}
+      {isAnalyzing && conflicts.length === 0 && !isStreaming && (
         <div className="text-center py-20">
           <div className="w-16 h-16 bg-orange-50 rounded-full flex items-center justify-center mx-auto mb-6">
             <Loader className="h-8 w-8 text-orange-600 animate-spin" />
           </div>
           <h3 className="text-xl font-bold text-slate-900 mb-2">Analyzing Requirements...</h3>
-          <p className="text-slate-500">AI is comparing {project.insights.length} insights for conflicts</p>
+          <p className="text-slate-500 mb-4">AI is comparing {project.insights.length} insights for conflicts</p>
+          {/* Progress Bar */}
+          <div className="max-w-xs mx-auto">
+            <div className="h-2 bg-slate-200 rounded-full overflow-hidden">
+              <motion.div 
+                className="h-full bg-orange-500 rounded-full"
+                initial={{ width: 0 }}
+                animate={{ width: `${analysisProgress}%` }}
+                transition={{ duration: 0.3 }}
+              />
+            </div>
+            <p className="text-xs text-slate-400 mt-2">{progressMessage || `${analysisProgress}% complete`}</p>
+          </div>
+        </div>
+      )}
+
+      {/* Streaming Results Panel */}
+      {isStreaming && (
+        <div className="mb-6">
+          <div className="bg-gradient-to-r from-orange-50 to-amber-50 rounded-2xl border border-orange-200 p-6">
+            <div className="flex items-center gap-4 mb-4">
+              <div className="relative">
+                <div className="w-12 h-12 bg-orange-100 rounded-full flex items-center justify-center">
+                  <Loader className="h-6 w-6 text-orange-600 animate-spin" />
+                </div>
+                <div className="absolute -top-1 -right-1 w-4 h-4 bg-green-500 rounded-full border-2 border-white animate-pulse" />
+              </div>
+              <div className="flex-1">
+                <h3 className="font-bold text-lg text-orange-900">Real-time Analysis</h3>
+                <p className="text-sm text-orange-700">{progressMessage}</p>
+              </div>
+              <div className="text-right">
+                <div className="text-2xl font-bold text-orange-900">{streamingConflicts.length}</div>
+                <div className="text-xs text-orange-600">conflicts found</div>
+              </div>
+            </div>
+            <div className="h-2 bg-orange-100 rounded-full overflow-hidden">
+              <motion.div 
+                className="h-full bg-gradient-to-r from-orange-500 to-amber-500 rounded-full"
+                initial={{ width: 0 }}
+                animate={{ width: `${analysisProgress}%` }}
+                transition={{ duration: 0.3 }}
+              />
+            </div>
+            
+            {/* Live conflict feed */}
+            {streamingConflicts.length > 0 && (
+              <div className="mt-4 space-y-2 max-h-40 overflow-y-auto">
+                {streamingConflicts.slice(-5).map((c, idx) => (
+                  <motion.div
+                    key={c.id}
+                    initial={{ opacity: 0, x: -20 }}
+                    animate={{ opacity: 1, x: 0 }}
+                    className={`p-3 rounded-xl flex items-center gap-3 ${
+                      c.severity === 'critical' ? 'bg-red-100' :
+                      c.severity === 'major' ? 'bg-orange-100' :
+                      'bg-yellow-100'
+                    }`}
+                  >
+                    <AlertTriangle className={`h-4 w-4 ${
+                      c.severity === 'critical' ? 'text-red-600' :
+                      c.severity === 'major' ? 'text-orange-600' :
+                      'text-yellow-600'
+                    }`} />
+                    <span className="text-sm font-medium text-slate-900 flex-1 truncate">
+                      {c.description}
+                    </span>
+                    <span className={`text-xs font-bold uppercase px-2 py-0.5 rounded ${
+                      c.severity === 'critical' ? 'bg-red-200 text-red-800' :
+                      c.severity === 'major' ? 'bg-orange-200 text-orange-800' :
+                      'bg-yellow-200 text-yellow-800'
+                    }`}>
+                      {c.severity}
+                    </span>
+                  </motion.div>
+                ))}
+              </div>
+            )}
+          </div>
         </div>
       )}
 
@@ -469,9 +1155,26 @@ const ConflictDetection: React.FC<ConflictDetectionProps> = ({
                 {/* Conflict Header */}
                 <div 
                   className={`p-6 cursor-pointer hover:bg-slate-50 transition-colors ${severityConfig.bg}`}
-                  onClick={() => setExpandedConflict(isExpanded ? null : conflict.id)}
+                  onClick={() => !batchMode && setExpandedConflict(isExpanded ? null : conflict.id)}
                 >
                   <div className="flex items-start gap-4">
+                    {/* Batch Selection Checkbox */}
+                    {batchMode && conflict.status === 'unresolved' && (
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          toggleConflictSelection(conflict.id);
+                        }}
+                        className="mt-1"
+                      >
+                        {selectedConflicts.has(conflict.id) ? (
+                          <CheckSquare className="h-5 w-5 text-purple-600" />
+                        ) : (
+                          <Square className="h-5 w-5 text-slate-400" />
+                        )}
+                      </button>
+                    )}
+                    
                     <div className={`p-2 rounded-xl ${severityConfig.bg}`}>
                       <SeverityIcon className={`h-5 w-5 ${severityConfig.text}`} />
                     </div>

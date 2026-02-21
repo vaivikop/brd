@@ -66,7 +66,7 @@ export const DATASETS: Record<string, DatasetConfig> = {
     downloadUrl: 'https://www.kaggle.com/datasets/wcukierski/enron-email-dataset',
     license: 'Public Domain',
     licenseUrl: 'https://www.ferc.gov/industries-data/electric/general-information/electric-industry-forms/form-no-2-2a-3-q-gas-2-2a',
-    recordCount: '~500,000 emails',
+    recordCount: '500 emails',
     fileFormat: 'CSV (emails.csv)',
     usageNotes: [
       'Extract project-relevant requirements from noisy everyday emails',
@@ -85,7 +85,7 @@ export const DATASETS: Record<string, DatasetConfig> = {
     downloadUrl: 'https://huggingface.co/datasets/knkarthick/AMI',
     license: 'CC BY 4.0',
     licenseUrl: 'https://creativecommons.org/licenses/by/4.0/',
-    recordCount: '~279 meetings',
+    recordCount: '100 meetings',
     fileFormat: 'JSON (transcripts + summaries)',
     usageNotes: [
       'Contains requirements discussions, design decisions, feature prioritization',
@@ -119,6 +119,8 @@ export const DATASETS: Record<string, DatasetConfig> = {
 // DATA TYPES
 // ============================================================================
 
+export type EmailClassification = 'noise' | 'low-relevance' | 'relevant' | 'high-relevance';
+
 export interface EnronEmail {
   id: string;
   messageId: string;
@@ -135,6 +137,10 @@ export interface EnronEmail {
   hasDecisionKeywords: boolean;
   hasDeadlineKeywords: boolean;
   relevanceScore: number;
+  // Noise classification
+  isNoise: boolean;
+  noiseReason?: string;
+  classification: EmailClassification;
 }
 
 export interface AMIMeeting {
@@ -213,6 +219,64 @@ export const KEYWORD_FILTERS = {
   ]
 };
 
+// Noise detection patterns - emails that are spam/auto-generated/not useful
+export const NOISE_PATTERNS = {
+  // Subject patterns indicating noise
+  subjectPatterns: [
+    /^(re:|fw:|fwd:)\s*(re:|fw:|fwd:)+/i, // Multiple forwards/replies chains
+    /^out of (the )?office/i,
+    /^automatic reply/i,
+    /^auto(-)?reply/i,
+    /^(ooo|oof):/i,
+    /unsubscribe/i,
+    /newsletter/i,
+    /subscription/i,
+    /^test\s*(email|message)?$/i,
+    /spam/i,
+    /\[spam\]/i,
+    /delivery (status )?notification/i,
+    /undeliverable/i,
+    /failed delivery/i,
+    /returned mail/i,
+    /postmaster/i,
+    /mailer(-)?daemon/i,
+    /calendar:/i,
+    /^accepted:/i,
+    /^declined:/i,
+    /^tentative:/i,
+    /meeting (request|invitation|cancelled|updated)/i,
+    /^invitation:/i,
+  ],
+  // Body patterns indicating noise
+  bodyPatterns: [
+    /this is an auto(-)?generated (message|email|reply)/i,
+    /do not reply to this (message|email)/i,
+    /this mailbox is not monitored/i,
+    /i('m| am) (currently )?(out of (the )?office|on vacation|away)/i,
+    /i will (be )?return(ing)? on/i,
+    /click here to unsubscribe/i,
+    /to unsubscribe from this/i,
+    /you are receiving this (email|message) because/i,
+    /this email was sent to/i,
+    /view this email in your browser/i,
+    /trouble viewing this email/i,
+    /add .+ to your address book/i,
+  ],
+  // Sender patterns indicating noise
+  senderPatterns: [
+    /no(-)?reply@/i,
+    /noreply@/i,
+    /do(-)?not(-)?reply@/i,
+    /mailer(-)?daemon@/i,
+    /postmaster@/i,
+    /bounce@/i,
+    /notification@/i,
+    /alert@/i,
+    /system@/i,
+    /automated@/i,
+  ]
+};
+
 // ============================================================================
 // DATASET LOADER CLASS
 // ============================================================================
@@ -260,7 +324,8 @@ export class DatasetLoader {
     
     let emails = rawData.slice(0, limit).map((row, index) => {
       if (isPreParsed) {
-        // Data is already in EnronEmail format
+        // Data is already in EnronEmail format - add noise detection
+        const noiseResult = this.detectNoise({ subject: row.subject || '', body: row.body || '', from: row.from || '' });
         return {
           ...row,
           to: Array.isArray(row.to) ? row.to : [row.to].filter(Boolean),
@@ -270,6 +335,9 @@ export class DatasetLoader {
           hasProjectKeywords: KEYWORD_FILTERS.project.some(k => `${row.subject} ${row.body}`.toLowerCase().includes(k)),
           hasDecisionKeywords: KEYWORD_FILTERS.decisions.some(k => `${row.subject} ${row.body}`.toLowerCase().includes(k)),
           hasDeadlineKeywords: KEYWORD_FILTERS.deadlines.some(k => `${row.subject} ${row.body}`.toLowerCase().includes(k)),
+          isNoise: noiseResult.isNoise,
+          noiseReason: noiseResult.reason,
+          classification: 'low-relevance' as EmailClassification,
         } as EnronEmail;
       }
       return this.parseEnronRow(row, index);
@@ -292,14 +360,23 @@ export class DatasetLoader {
       });
     }
 
-    // Calculate relevance scores
-    emails = emails.map(email => ({
-      ...email,
-      relevanceScore: this.calculateRelevanceScore(email)
-    }));
+    // Calculate relevance scores and classification
+    emails = emails.map(email => {
+      const relevanceScore = this.calculateRelevanceScore(email);
+      const updatedEmail = { ...email, relevanceScore };
+      return {
+        ...updatedEmail,
+        classification: this.classifyEmail(updatedEmail)
+      };
+    });
 
-    // Sort by relevance
-    emails.sort((a, b) => b.relevanceScore - a.relevanceScore);
+    // Sort by relevance (noise at the bottom)
+    emails.sort((a, b) => {
+      // Noise always at the bottom
+      if (a.isNoise && !b.isNoise) return 1;
+      if (!a.isNoise && b.isNoise) return -1;
+      return b.relevanceScore - a.relevanceScore;
+    });
 
     return emails;
   }
@@ -530,8 +607,12 @@ export class DatasetLoader {
     const date = this.extractEmailHeader(body, 'Date') || row.date || new Date().toISOString();
 
     const content = `${subject} ${body}`.toLowerCase();
+    const extractedBody = this.extractEmailBody(body);
     
-    return {
+    // Detect noise first
+    const noiseResult = this.detectNoise({ subject, body: extractedBody, from });
+    
+    const email: EnronEmail = {
       id: `enron_${index}`,
       messageId: row.messageId || row['Message-ID'] || `msg_${index}`,
       date,
@@ -540,13 +621,18 @@ export class DatasetLoader {
       cc,
       bcc,
       subject,
-      body: this.extractEmailBody(body),
+      body: extractedBody,
       folder: row.folder || row.file || '',
       hasProjectKeywords: KEYWORD_FILTERS.project.some(k => content.includes(k)),
       hasDecisionKeywords: KEYWORD_FILTERS.decisions.some(k => content.includes(k)),
       hasDeadlineKeywords: KEYWORD_FILTERS.deadlines.some(k => content.includes(k)),
-      relevanceScore: 0
+      relevanceScore: 0,
+      isNoise: noiseResult.isNoise,
+      noiseReason: noiseResult.reason,
+      classification: 'low-relevance' // Will be updated after relevance score
     };
+    
+    return email;
   }
 
   private static extractEmailHeader(content: string, header: string): string {
@@ -583,7 +669,63 @@ export class DatasetLoader {
     };
   }
 
+  /**
+   * Detect if email is noise (spam, auto-generated, etc.)
+   */
+  private static detectNoise(email: { subject: string; body: string; from: string }): { isNoise: boolean; reason?: string } {
+    const subject = email.subject || '';
+    const body = email.body || '';
+    const from = email.from || '';
+    
+    // Check subject patterns
+    for (const pattern of NOISE_PATTERNS.subjectPatterns) {
+      if (pattern.test(subject)) {
+        return { isNoise: true, reason: 'Auto-generated or system email' };
+      }
+    }
+    
+    // Check sender patterns
+    for (const pattern of NOISE_PATTERNS.senderPatterns) {
+      if (pattern.test(from)) {
+        return { isNoise: true, reason: 'Automated sender' };
+      }
+    }
+    
+    // Check body patterns
+    for (const pattern of NOISE_PATTERNS.bodyPatterns) {
+      if (pattern.test(body)) {
+        return { isNoise: true, reason: 'Auto-reply or notification' };
+      }
+    }
+    
+    // Check for very short emails with no substance (< 5 words)
+    const wordCount = body.split(/\s+/).filter(w => w.length > 0).length;
+    if (wordCount < 5 && !subject) {
+      return { isNoise: true, reason: 'Empty or minimal content' };
+    }
+    
+    // Check for purely forwarded content with no original message
+    if (/^-+\s*forwarded/im.test(body) && body.split(/^-+\s*forwarded/im)[0].trim().length < 20) {
+      return { isNoise: true, reason: 'Forward-only with no context' };
+    }
+    
+    return { isNoise: false };
+  }
+
+  /**
+   * Classify email based on relevance score and noise detection
+   */
+  private static classifyEmail(email: EnronEmail): EmailClassification {
+    if (email.isNoise) return 'noise';
+    if (email.relevanceScore >= 0.7) return 'high-relevance';
+    if (email.relevanceScore >= 0.4) return 'relevant';
+    return 'low-relevance';
+  }
+
   private static calculateRelevanceScore(email: EnronEmail): number {
+    // If already marked as noise, score is 0
+    if (email.isNoise) return 0;
+    
     let score = 0;
     const content = `${email.subject} ${email.body}`.toLowerCase();
     

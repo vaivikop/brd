@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useCallback } from 'react';
 import { 
   Users, 
   TrendingUp, 
@@ -18,13 +18,42 @@ import {
   MessageSquare,
   ChevronDown,
   ChevronUp,
-  X
+  X,
+  Quote,
+  Clock,
+  LineChart,
+  Calendar,
+  FileText
 } from 'lucide-react';
 import { motion } from 'motion/react';
 import Button from './Button';
 import Tooltip from './Tooltip';
 import { ProjectState, updateProjectContext } from '../utils/db';
 import { analyzeStakeholderSentiment, SentimentReport, StakeholderSentiment } from '../utils/services/ai';
+
+// Historical sentiment tracking
+interface SentimentHistory {
+  timestamp: string;
+  averageScore: number;
+  stakeholderScores: Record<string, number>;
+  overallSentiment: string;
+}
+
+// Content hash for better cache invalidation
+const generateContentHash = (insights: any[]): string => {
+  const content = insights.map(i => `${i.id}${i.summary}`).join('');
+  let hash = 0;
+  for (let i = 0; i < content.length; i++) {
+    const char = content.charCodeAt(i);
+    hash = ((hash << 5) - hash) + char;
+    hash = hash & hash;
+  }
+  return Math.abs(hash).toString(36);
+};
+
+// localStorage keys
+const HISTORY_STORAGE_KEY = 'clarity_sentiment_history';
+const MAX_HISTORY_ENTRIES = 50;
 
 interface SentimentDashboardProps {
   project: ProjectState;
@@ -50,6 +79,59 @@ const SentimentDashboard: React.FC<SentimentDashboardProps> = ({
   const [lastAnalyzed, setLastAnalyzed] = useState<Date | null>(null);
   const [expandedStakeholders, setExpandedStakeholders] = useState<Set<string>>(new Set());
   const [detailModal, setDetailModal] = useState<{ type: 'concerns' | 'supports'; stakeholder: string; items: string[] } | null>(null);
+  const [analysisProgress, setAnalysisProgress] = useState(0);
+  
+  // New state for historical tracking and evidence
+  const [sentimentHistory, setSentimentHistory] = useState<SentimentHistory[]>([]);
+  const [showHistoryChart, setShowHistoryChart] = useState(false);
+  const [evidenceModal, setEvidenceModal] = useState<{ stakeholder: StakeholderSentiment } | null>(null);
+  const [contentHash, setContentHash] = useState<string>('');
+
+  // Load sentiment history from localStorage
+  useEffect(() => {
+    try {
+      const stored = localStorage.getItem(`${HISTORY_STORAGE_KEY}_${project.id}`);
+      if (stored) {
+        setSentimentHistory(JSON.parse(stored));
+      }
+    } catch (e) {
+      console.error('Failed to load sentiment history:', e);
+    }
+  }, [project.id]);
+
+  // Generate content hash when insights change
+  useEffect(() => {
+    if (project.insights) {
+      setContentHash(generateContentHash(project.insights));
+    }
+  }, [project.insights]);
+
+  // Save sentiment history to localStorage
+  const saveHistory = useCallback((newReport: SentimentReport) => {
+    const newEntry: SentimentHistory = {
+      timestamp: new Date().toISOString(),
+      averageScore: newReport.averageSentimentScore,
+      stakeholderScores: Object.fromEntries(
+        newReport.stakeholders.map(s => [s.stakeholder, s.sentimentScore])
+      ),
+      overallSentiment: newReport.overallProjectSentiment
+    };
+
+    setSentimentHistory(prev => {
+      const updated = [...prev, newEntry].slice(-MAX_HISTORY_ENTRIES);
+      try {
+        localStorage.setItem(`${HISTORY_STORAGE_KEY}_${project.id}`, JSON.stringify(updated));
+      } catch (e) {
+        console.error('Failed to save sentiment history:', e);
+      }
+      return updated;
+    });
+  }, [project.id]);
+
+  // Open evidence modal for a stakeholder
+  const openEvidenceModal = (stakeholder: StakeholderSentiment) => {
+    setEvidenceModal({ stakeholder });
+  };
 
   const toggleStakeholderExpand = (stakeholder: string) => {
     setExpandedStakeholders(prev => {
@@ -67,14 +149,18 @@ const SentimentDashboard: React.FC<SentimentDashboardProps> = ({
     setDetailModal({ type, stakeholder, items });
   };
 
-  // Load cached report on mount
+  // Load cached report on mount - with content hash validation
   useEffect(() => {
     const cachedReport = (project as any).sentimentReport;
+    const cachedHash = (project as any).sentimentContentHash;
     if (cachedReport) {
-      setReport(cachedReport);
-      setLastAnalyzed(new Date((project as any).sentimentAnalyzedAt || Date.now()));
+      // Only use cache if content hash matches
+      if (cachedHash === contentHash || !contentHash) {
+        setReport(cachedReport);
+        setLastAnalyzed(new Date((project as any).sentimentAnalyzedAt || Date.now()));
+      }
     }
-  }, [project]);
+  }, [project, contentHash]);
 
   const handleAnalyze = async () => {
     if (!project.insights || project.insights.length === 0) {
@@ -84,17 +170,30 @@ const SentimentDashboard: React.FC<SentimentDashboardProps> = ({
 
     setIsAnalyzing(true);
     setError(null);
+    setAnalysisProgress(0);
+
+    // Simulate progress for better UX
+    const progressInterval = setInterval(() => {
+      setAnalysisProgress(prev => Math.min(prev + 8, 90));
+    }, 400);
 
     try {
       const result = await analyzeStakeholderSentiment(project.insights, project.sources || []);
+      setAnalysisProgress(100);
+      clearInterval(progressInterval);
       setReport(result);
       setLastAnalyzed(new Date());
 
-      // Cache the report
+      // Save to history for trend tracking
+      saveHistory(result);
+
+      // Cache the report with content hash for proper invalidation
+      const currentHash = generateContentHash(project.insights);
       const updated = await updateProjectContext({
         ...project,
         sentimentReport: result,
-        sentimentAnalyzedAt: new Date().toISOString()
+        sentimentAnalyzedAt: new Date().toISOString(),
+        sentimentContentHash: currentHash
       } as any);
       onUpdate(updated);
     } catch (err) {
@@ -151,6 +250,14 @@ const SentimentDashboard: React.FC<SentimentDashboardProps> = ({
                 Last analyzed: {lastAnalyzed.toLocaleTimeString()}
               </span>
             )}
+            {sentimentHistory.length > 1 && (
+              <Button 
+                variant="outline"
+                onClick={() => setShowHistoryChart(true)}
+              >
+                <LineChart className="h-4 w-4 mr-2" /> View Trends
+              </Button>
+            )}
             <Button 
               onClick={handleAnalyze}
               disabled={isAnalyzing}
@@ -178,14 +285,26 @@ const SentimentDashboard: React.FC<SentimentDashboardProps> = ({
         </div>
       )}
 
-      {/* Loading State */}
+      {/* Loading State with Progress */}
       {isAnalyzing && !report && (
         <div className="text-center py-20">
           <div className="w-16 h-16 bg-purple-50 rounded-full flex items-center justify-center mx-auto mb-6">
             <Loader className="h-8 w-8 text-purple-600 animate-spin" />
           </div>
           <h3 className="text-xl font-bold text-slate-900 mb-2">Analyzing Stakeholder Sentiment...</h3>
-          <p className="text-slate-500">AI is examining {project.insights.length} insights for sentiment patterns</p>
+          <p className="text-slate-500 mb-4">AI is examining {project.insights.length} insights for sentiment patterns</p>
+          {/* Progress Bar */}
+          <div className="max-w-xs mx-auto">
+            <div className="h-2 bg-slate-200 rounded-full overflow-hidden">
+              <motion.div 
+                className="h-full bg-purple-500 rounded-full"
+                initial={{ width: 0 }}
+                animate={{ width: `${analysisProgress}%` }}
+                transition={{ duration: 0.3 }}
+              />
+            </div>
+            <p className="text-xs text-slate-400 mt-2">{analysisProgress}% complete</p>
+          </div>
         </div>
       )}
 
@@ -388,6 +507,14 @@ const SentimentDashboard: React.FC<SentimentDashboardProps> = ({
                         <ChevronUp className="h-3 w-3" /> Show less
                       </button>
                     )}
+
+                    {/* View Evidence Button */}
+                    <button
+                      onClick={() => openEvidenceModal(stakeholder)}
+                      className="mt-3 w-full px-3 py-2 bg-white/80 hover:bg-white text-slate-700 text-xs font-medium rounded-lg border border-slate-200 transition-colors flex items-center justify-center gap-2"
+                    >
+                      <Quote className="h-3 w-3" /> View Evidence & Quotes
+                    </button>
                   </motion.div>
                 );
               })}
@@ -509,6 +636,234 @@ const SentimentDashboard: React.FC<SentimentDashboardProps> = ({
             </div>
             <div className="px-6 py-4 border-t border-slate-100 bg-slate-50 flex justify-end">
               <Button variant="outline" onClick={() => setDetailModal(null)}>
+                Close
+              </Button>
+            </div>
+          </motion.div>
+        </div>
+      )}
+
+      {/* Historical Trend Chart Modal */}
+      {showHistoryChart && sentimentHistory.length > 0 && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4 animate-in fade-in duration-200">
+          <motion.div 
+            initial={{ opacity: 0, scale: 0.95 }}
+            animate={{ opacity: 1, scale: 1 }}
+            className="bg-white rounded-2xl shadow-2xl max-w-4xl w-full max-h-[80vh] overflow-hidden"
+          >
+            <div className="px-6 py-4 border-b bg-gradient-to-r from-purple-50 to-slate-50 flex items-center justify-between">
+              <div>
+                <h3 className="font-bold text-lg text-slate-900 flex items-center gap-2">
+                  <LineChart className="h-5 w-5 text-purple-600" />
+                  Sentiment Trend Over Time
+                </h3>
+                <p className="text-sm text-slate-600">{sentimentHistory.length} data points recorded</p>
+              </div>
+              <button
+                onClick={() => setShowHistoryChart(false)}
+                className="p-2 hover:bg-white rounded-lg transition-colors"
+              >
+                <X className="h-5 w-5 text-slate-600" />
+              </button>
+            </div>
+            <div className="p-6 overflow-y-auto max-h-[60vh]">
+              {/* Simple SVG Chart */}
+              <div className="bg-slate-50 rounded-xl p-4 mb-6">
+                <svg viewBox="0 0 800 200" className="w-full h-48">
+                  {/* Grid lines */}
+                  <line x1="50" y1="100" x2="750" y2="100" stroke="#e2e8f0" strokeDasharray="4" />
+                  <line x1="50" y1="50" x2="750" y2="50" stroke="#e2e8f0" strokeDasharray="4" />
+                  <line x1="50" y1="150" x2="750" y2="150" stroke="#e2e8f0" strokeDasharray="4" />
+                  
+                  {/* Axis labels */}
+                  <text x="30" y="55" fill="#64748b" fontSize="10">+100</text>
+                  <text x="30" y="105" fill="#64748b" fontSize="10">0</text>
+                  <text x="30" y="155" fill="#64748b" fontSize="10">-100</text>
+                  
+                  {/* Data line */}
+                  {sentimentHistory.length > 1 && (
+                    <path
+                      d={sentimentHistory.map((entry, idx) => {
+                        const x = 50 + (idx / (sentimentHistory.length - 1)) * 700;
+                        const y = 100 - (entry.averageScore / 100) * 50;
+                        return `${idx === 0 ? 'M' : 'L'} ${x} ${y}`;
+                      }).join(' ')}
+                      fill="none"
+                      stroke="#8b5cf6"
+                      strokeWidth="3"
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                    />
+                  )}
+                  
+                  {/* Data points */}
+                  {sentimentHistory.map((entry, idx) => {
+                    const x = 50 + (idx / Math.max(sentimentHistory.length - 1, 1)) * 700;
+                    const y = 100 - (entry.averageScore / 100) * 50;
+                    return (
+                      <g key={idx}>
+                        <circle
+                          cx={x}
+                          cy={y}
+                          r="6"
+                          fill={entry.averageScore >= 0 ? '#10b981' : '#ef4444'}
+                          stroke="#fff"
+                          strokeWidth="2"
+                        />
+                        <title>{new Date(entry.timestamp).toLocaleDateString()} - Score: {entry.averageScore}</title>
+                      </g>
+                    );
+                  })}
+                </svg>
+              </div>
+              
+              {/* History Table */}
+              <div className="space-y-2">
+                <h4 className="font-bold text-slate-700 mb-3">Analysis History</h4>
+                {[...sentimentHistory].reverse().slice(0, 10).map((entry, idx) => (
+                  <div key={idx} className="flex items-center justify-between p-3 bg-white rounded-lg border border-slate-100">
+                    <div className="flex items-center gap-3">
+                      <Calendar className="h-4 w-4 text-slate-400" />
+                      <span className="text-sm text-slate-600">
+                        {new Date(entry.timestamp).toLocaleString()}
+                      </span>
+                    </div>
+                    <div className="flex items-center gap-4">
+                      <span className={`px-2 py-1 rounded-full text-xs font-medium ${
+                        SENTIMENT_CONFIG[entry.overallSentiment as keyof typeof SENTIMENT_CONFIG]?.bg || 'bg-slate-100'
+                      } ${SENTIMENT_CONFIG[entry.overallSentiment as keyof typeof SENTIMENT_CONFIG]?.text || 'text-slate-600'}`}>
+                        {entry.overallSentiment}
+                      </span>
+                      <span className={`font-bold text-sm ${entry.averageScore >= 0 ? 'text-emerald-600' : 'text-red-600'}`}>
+                        {entry.averageScore > 0 ? '+' : ''}{entry.averageScore}
+                      </span>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+            <div className="px-6 py-4 border-t border-slate-100 bg-slate-50 flex justify-end">
+              <Button variant="outline" onClick={() => setShowHistoryChart(false)}>
+                Close
+              </Button>
+            </div>
+          </motion.div>
+        </div>
+      )}
+
+      {/* Evidence Modal - Drill down into stakeholder quotes */}
+      {evidenceModal && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4 animate-in fade-in duration-200">
+          <motion.div 
+            initial={{ opacity: 0, scale: 0.95 }}
+            animate={{ opacity: 1, scale: 1 }}
+            className="bg-white rounded-2xl shadow-2xl max-w-3xl w-full max-h-[80vh] overflow-hidden"
+          >
+            <div className="px-6 py-4 border-b bg-gradient-to-r from-purple-50 to-slate-50 flex items-center justify-between">
+              <div>
+                <h3 className="font-bold text-lg text-slate-900 flex items-center gap-2">
+                  <Quote className="h-5 w-5 text-purple-600" />
+                  Evidence & Quotes
+                </h3>
+                <p className="text-sm text-slate-600">
+                  Stakeholder: <span className="font-medium">{evidenceModal.stakeholder.stakeholder}</span>
+                  {evidenceModal.stakeholder.role && ` - ${evidenceModal.stakeholder.role}`}
+                </p>
+              </div>
+              <button
+                onClick={() => setEvidenceModal(null)}
+                className="p-2 hover:bg-white rounded-lg transition-colors"
+              >
+                <X className="h-5 w-5 text-slate-600" />
+              </button>
+            </div>
+            <div className="p-6 overflow-y-auto max-h-[60vh]">
+              {/* Sentiment Summary */}
+              <div className="flex items-center gap-4 p-4 bg-slate-50 rounded-xl mb-6">
+                <div className={`p-3 rounded-xl ${SENTIMENT_CONFIG[evidenceModal.stakeholder.overallSentiment].bg}`}>
+                  {React.createElement(SENTIMENT_CONFIG[evidenceModal.stakeholder.overallSentiment].icon, { 
+                    className: `h-6 w-6 ${SENTIMENT_CONFIG[evidenceModal.stakeholder.overallSentiment].text}` 
+                  })}
+                </div>
+                <div>
+                  <div className="font-bold text-slate-900">
+                    Sentiment Score: {evidenceModal.stakeholder.sentimentScore > 0 ? '+' : ''}{evidenceModal.stakeholder.sentimentScore}
+                  </div>
+                  <div className="text-sm text-slate-600 capitalize">
+                    {evidenceModal.stakeholder.overallSentiment} sentiment • {evidenceModal.stakeholder.engagementLevel} engagement
+                  </div>
+                </div>
+              </div>
+
+              {/* Evidence Quotes */}
+              {evidenceModal.stakeholder.evidenceQuotes && evidenceModal.stakeholder.evidenceQuotes.length > 0 ? (
+                <div className="space-y-4">
+                  <h4 className="font-bold text-slate-700 flex items-center gap-2">
+                    <FileText className="h-4 w-4" /> Supporting Evidence
+                  </h4>
+                  {evidenceModal.stakeholder.evidenceQuotes.map((quote, idx) => (
+                    <div 
+                      key={idx} 
+                      className={`p-4 rounded-xl border-l-4 ${
+                        quote.sentiment === 'positive' ? 'bg-emerald-50 border-emerald-500' :
+                        quote.sentiment === 'negative' ? 'bg-red-50 border-red-500' :
+                        'bg-slate-50 border-slate-400'
+                      }`}
+                    >
+                      <div className="flex items-start gap-3">
+                        <Quote className={`h-4 w-4 mt-1 flex-shrink-0 ${
+                          quote.sentiment === 'positive' ? 'text-emerald-500' :
+                          quote.sentiment === 'negative' ? 'text-red-500' :
+                          'text-slate-400'
+                        }`} />
+                        <div className="flex-1">
+                          <p className="text-sm text-slate-800 italic">&ldquo;{quote.text}&rdquo;</p>
+                          <p className="text-xs text-slate-500 mt-2 flex items-center gap-1">
+                            <FileText className="h-3 w-3" /> {quote.source}
+                          </p>
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <div className="text-center py-8 text-slate-500">
+                  <Quote className="h-12 w-12 text-slate-300 mx-auto mb-3" />
+                  <p>No specific evidence quotes were extracted for this analysis.</p>
+                  <p className="text-sm mt-2">Run a new analysis to gather evidence from your sources.</p>
+                </div>
+              )}
+
+              {/* Concerns and Supports Summary */}
+              <div className="grid md:grid-cols-2 gap-4 mt-6">
+                {evidenceModal.stakeholder.concerns.length > 0 && (
+                  <div className="bg-red-50 rounded-xl p-4 border border-red-100">
+                    <h5 className="font-medium text-red-900 mb-2">Concerns ({evidenceModal.stakeholder.concerns.length})</h5>
+                    <ul className="space-y-1">
+                      {evidenceModal.stakeholder.concerns.map((c, i) => (
+                        <li key={i} className="text-sm text-red-700 flex items-start gap-2">
+                          <span className="text-red-400 mt-1">•</span> {c}
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+                {evidenceModal.stakeholder.supportedItems.length > 0 && (
+                  <div className="bg-emerald-50 rounded-xl p-4 border border-emerald-100">
+                    <h5 className="font-medium text-emerald-900 mb-2">Supports ({evidenceModal.stakeholder.supportedItems.length})</h5>
+                    <ul className="space-y-1">
+                      {evidenceModal.stakeholder.supportedItems.map((s, i) => (
+                        <li key={i} className="text-sm text-emerald-700 flex items-start gap-2">
+                          <span className="text-emerald-400 mt-1">•</span> {s}
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+              </div>
+            </div>
+            <div className="px-6 py-4 border-t border-slate-100 bg-slate-50 flex justify-end">
+              <Button variant="outline" onClick={() => setEvidenceModal(null)}>
                 Close
               </Button>
             </div>

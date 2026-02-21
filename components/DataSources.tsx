@@ -1,4 +1,4 @@
-import React, { useState, useRef } from 'react';
+import React, { useState, useRef, useMemo, useEffect } from 'react';
 import { 
   Database, 
   UploadCloud, 
@@ -15,7 +15,13 @@ import {
   ExternalLink,
   Sparkles,
   Zap,
-  Clock
+  Clock,
+  Filter,
+  SlidersHorizontal,
+  Eye,
+  EyeOff,
+  Search,
+  X
 } from 'lucide-react';
 import Button from './Button';
 import Tooltip from './Tooltip';
@@ -26,7 +32,8 @@ import {
   getAllDatasets, 
   EnronEmail, 
   AMIMeeting, 
-  MeetingTranscript
+  MeetingTranscript,
+  ParsedSource
 } from '../utils/services/datasets';
 
 interface DataSourcesProps {
@@ -35,21 +42,131 @@ interface DataSourcesProps {
   onContinue?: () => void;
 }
 
+type TabType = 'overview' | 'enron' | 'ami' | 'transcripts' | 'slack';
+
 const DataSources: React.FC<DataSourcesProps> = ({ project, onUpdate, onContinue }) => {
   const [isLoadingDataset, setIsLoadingDataset] = useState<string | null>(null);
   const [loadedDatasets, setLoadedDatasets] = useState<{
     enron?: EnronEmail[];
     ami?: AMIMeeting[];
     transcripts?: MeetingTranscript[];
+    slack?: ParsedSource[];
   }>({});
   const [datasetStats, setDatasetStats] = useState<{
     emailsLoaded: number;
     meetingsLoaded: number;
-    relevantItems: number;
-  }>({ emailsLoaded: 0, meetingsLoaded: 0, relevantItems: 0 });
+    transcriptsLoaded: number;
+    slackLoaded: number;
+  }>({ emailsLoaded: 0, meetingsLoaded: 0, transcriptsLoaded: 0, slackLoaded: 0 });
+  
+  // Threshold control - default 50%
+  const [relevanceThreshold, setRelevanceThreshold] = useState(0.5);
+  const [activeTab, setActiveTab] = useState<TabType>('overview');
+  const [searchQuery, setSearchQuery] = useState('');
+  const [showOnlyUsed, setShowOnlyUsed] = useState(false);
+  
   const { showToast } = useToast();
   const datasetFileInputRef = useRef<HTMLInputElement>(null);
   const [activeDatasetUpload, setActiveDatasetUpload] = useState<string | null>(null);
+
+  // Computed values - use project.sources for persisted counts, loadedDatasets for live filtering
+  const sourceStats = useMemo(() => {
+    const sources = project.sources || [];
+    const emailsUsed = sources.filter(s => s.fileType?.includes('enron')).length;
+    const meetings = sources.filter(s => s.fileType?.includes('ami') || s.fileType?.includes('meeting')).length;
+    const transcripts = sources.filter(s => s.fileType?.includes('transcript')).length;
+    const slack = sources.filter(s => s.fileType?.includes('slack') || s.fileType?.includes('chat')).length;
+    return { emailsUsed, meetings, transcripts, slack };
+  }, [project.sources]);
+
+  // Email stats from loaded dataset (for threshold preview)
+  const emailStats = useMemo(() => {
+    if (!loadedDatasets.enron) {
+      return { 
+        total: sourceStats.emailsUsed, 
+        relevant: sourceStats.emailsUsed, 
+        noise: 0, 
+        lowRelevance: 0,
+        used: sourceStats.emailsUsed 
+      };
+    }
+    const actualNoise = loadedDatasets.enron.filter(e => e.isNoise);
+    const relevant = loadedDatasets.enron.filter(e => !e.isNoise && e.relevanceScore >= relevanceThreshold);
+    const lowRelevance = loadedDatasets.enron.filter(e => !e.isNoise && e.relevanceScore < relevanceThreshold);
+    return { 
+      total: loadedDatasets.enron.length, 
+      relevant: relevant.length, 
+      noise: actualNoise.length, 
+      lowRelevance: lowRelevance.length,
+      used: sourceStats.emailsUsed 
+    };
+  }, [loadedDatasets.enron, relevanceThreshold, sourceStats.emailsUsed]);
+
+  // Reload full datasets from JSON files when sources exist but loadedDatasets is empty
+  // This ensures we have all emails (including noise/low-relevance) after page refresh
+  useEffect(() => {
+    const sources = project.sources || [];
+    
+    const loadDatasetsFromFiles = async () => {
+      // Reload Enron emails if sources exist but state is empty
+      const hasEnronSources = sources.some(s => s.fileType === 'email/enron' || s.id.startsWith('enron_'));
+      if (hasEnronSources && !loadedDatasets.enron) {
+        try {
+          const emails = await DatasetLoader.loadEnronEmails({ 
+            limit: 500,
+            filterByKeywords: ['requirements', 'decisions', 'project']
+          });
+          setLoadedDatasets(prev => ({ ...prev, enron: emails }));
+          setDatasetStats(prev => ({ ...prev, emailsLoaded: emails.length }));
+        } catch (err) {
+          console.error('Failed to reload Enron emails:', err);
+        }
+      }
+
+      // Reload AMI meetings if sources exist but state is empty
+      const hasAmiSources = sources.some(s => s.fileType === 'meeting/ami' || s.id.startsWith('ami_'));
+      if (hasAmiSources && !loadedDatasets.ami) {
+        try {
+          const meetings = await DatasetLoader.loadAMIMeetings({ limit: 100 });
+          setLoadedDatasets(prev => ({ ...prev, ami: meetings }));
+          setDatasetStats(prev => ({ ...prev, meetingsLoaded: meetings.length }));
+        } catch (err) {
+          console.error('Failed to reload AMI meetings:', err);
+        }
+      }
+
+      // Reload transcripts if sources exist but state is empty
+      const hasTranscriptSources = sources.some(s => s.fileType === 'meeting/transcript' || s.id.startsWith('transcript_'));
+      if (hasTranscriptSources && !loadedDatasets.transcripts) {
+        try {
+          const transcripts = await DatasetLoader.loadMeetingTranscripts({ limit: 50 });
+          setLoadedDatasets(prev => ({ ...prev, transcripts: transcripts }));
+          setDatasetStats(prev => ({ ...prev, transcriptsLoaded: transcripts.length }));
+        } catch (err) {
+          console.error('Failed to reload transcripts:', err);
+        }
+      }
+
+      // Note: Slack messages are synthetic and reconstructed from sources
+      const slackSources = sources.filter(s => s.fileType === 'chat/synthetic' || s.id.startsWith('slack_'));
+      if (slackSources.length > 0 && !loadedDatasets.slack) {
+        const slackMessages: ParsedSource[] = slackSources.map((source) => ({
+          id: source.id,
+          type: 'chat' as const,
+          dataset: 'slack',
+          title: source.name || 'Slack Message',
+          content: source.content || '',
+          metadata: { channel: source.name || 'general' },
+          relevanceScore: 0.6,
+          timestamp: source.timestamp || new Date().toISOString()
+        }));
+        setLoadedDatasets(prev => ({ ...prev, slack: slackMessages }));
+        setDatasetStats(prev => ({ ...prev, slackLoaded: slackMessages.length }));
+      }
+    };
+
+    loadDatasetsFromFiles();
+  }, []); // Only run once on mount
 
   // Check which datasets are already loaded by examining sources
   const getLoadedDatasetIds = () => {
@@ -75,11 +192,10 @@ const DataSources: React.FC<DataSourcesProps> = ({ project, onUpdate, onContinue
   const alreadyLoadedDatasets = getLoadedDatasetIds();
 
   // ============================================================================
-  // REAL DATASET LOADING HANDLERS
+  // DATASET LOADING HANDLERS
   // ============================================================================
 
   const handleLoadSampleDataset = async (datasetId: string) => {
-    // Prevent loading if already loaded
     if (alreadyLoadedDatasets.includes(datasetId)) {
       showToast({
         type: 'info',
@@ -95,22 +211,20 @@ const DataSources: React.FC<DataSourcesProps> = ({ project, onUpdate, onContinue
       let sourcesToAdd: Source[] = [];
       
       if (datasetId === 'enron') {
-        // Load all real Enron emails (500 from extracted dataset)
         const emails = await DatasetLoader.loadEnronEmails({ 
           limit: 500,
           filterByKeywords: ['requirements', 'decisions', 'project']
         });
         
         setLoadedDatasets(prev => ({ ...prev, enron: emails }));
-        setDatasetStats(prev => ({ 
-          ...prev, 
-          emailsLoaded: emails.length,
-          relevantItems: prev.relevantItems + emails.filter(e => e.relevanceScore > 0.3).length
-        }));
+        setDatasetStats(prev => ({ ...prev, emailsLoaded: emails.length }));
 
-        // Add top 15 relevant emails as sources for analysis
-        const topEmails = emails.slice(0, 15);
-        sourcesToAdd = topEmails.map((email, idx) => ({
+        // Add emails above threshold as sources (exclude spam/auto emails)
+        const spamCount = emails.filter(e => e.isNoise).length;
+        const relevantEmails = emails.filter(e => !e.isNoise && e.relevanceScore >= relevanceThreshold);
+        const lowRelevanceCount = emails.filter(e => !e.isNoise && e.relevanceScore < relevanceThreshold).length;
+        
+        sourcesToAdd = relevantEmails.map((email, idx) => ({
           id: `enron_${Date.now()}_${idx}`,
           type: 'email' as const,
           name: email.subject.slice(0, 50) + (email.subject.length > 50 ? '...' : ''),
@@ -122,24 +236,17 @@ const DataSources: React.FC<DataSourcesProps> = ({ project, onUpdate, onContinue
 
         showToast({
           type: 'success',
-          title: 'Real Enron Data Loaded',
-          message: `${emails.length} real corporate emails loaded from Enron dataset, ${emails.filter(e => e.relevanceScore > 0.3).length} marked as high relevance`
+          title: 'Enron Dataset Loaded',
+          message: `${emails.length} emails → ${relevantEmails.length} used, ${lowRelevanceCount} low relevance, ${spamCount} spam/auto filtered`
         });
 
       } else if (datasetId === 'ami') {
-        // Load all real AMI meeting transcripts (100 from downloaded dataset)
         const meetings = await DatasetLoader.loadAMIMeetings({ limit: 100 });
         
         setLoadedDatasets(prev => ({ ...prev, ami: meetings }));
-        setDatasetStats(prev => ({ 
-          ...prev, 
-          meetingsLoaded: meetings.length,
-          relevantItems: prev.relevantItems + meetings.length
-        }));
+        setDatasetStats(prev => ({ ...prev, meetingsLoaded: meetings.length }));
 
-        // Add top 10 meetings as sources for analysis
-        sourcesToAdd = meetings.slice(0, 10).map((meeting, idx) => {
-          // Handle both formats: {role, text} or {speaker, text}
+        sourcesToAdd = meetings.map((meeting, idx) => {
           const transcriptText = Array.isArray(meeting.transcript) 
             ? meeting.transcript.map(t => `[${t.role || t.speaker || 'Speaker'}]: ${t.text}`).join('\n')
             : String(meeting.transcript || '');
@@ -157,22 +264,17 @@ const DataSources: React.FC<DataSourcesProps> = ({ project, onUpdate, onContinue
 
         showToast({
           type: 'success',
-          title: 'Real Meeting Data Loaded',
-          message: `${meetings.length} real dialogue transcripts with summaries loaded`
+          title: 'AMI Corpus Loaded',
+          message: `${meetings.length} meeting transcripts loaded and added as sources`
         });
 
       } else if (datasetId === 'meetingTranscripts') {
-        // Load simple meeting transcripts
         const transcripts = await DatasetLoader.loadMeetingTranscripts({ limit: 20 });
         
         setLoadedDatasets(prev => ({ ...prev, transcripts }));
-        setDatasetStats(prev => ({ 
-          ...prev, 
-          meetingsLoaded: prev.meetingsLoaded + transcripts.length,
-          relevantItems: prev.relevantItems + transcripts.length
-        }));
+        setDatasetStats(prev => ({ ...prev, transcriptsLoaded: transcripts.length }));
 
-        sourcesToAdd = transcripts.slice(0, 3).map((transcript, idx) => ({
+        sourcesToAdd = transcripts.map((transcript, idx) => ({
           id: `transcript_${Date.now()}_${idx}`,
           type: 'meeting' as const,
           name: transcript.title,
@@ -184,8 +286,8 @@ const DataSources: React.FC<DataSourcesProps> = ({ project, onUpdate, onContinue
 
         showToast({
           type: 'success',
-          title: 'Meeting Transcripts Loaded',
-          message: `${transcripts.length} transcripts loaded for analysis`
+          title: 'Transcripts Loaded',
+          message: `${transcripts.length} meeting transcripts added as sources`
         });
       }
 
@@ -217,15 +319,10 @@ const DataSources: React.FC<DataSourcesProps> = ({ project, onUpdate, onContinue
       if (activeDatasetUpload === 'enron') {
         const emails = await DatasetLoader.loadEnronEmails({ fromFile: file, limit: 1000 });
         setLoadedDatasets(prev => ({ ...prev, enron: emails }));
-        setDatasetStats(prev => ({
-          ...prev,
-          emailsLoaded: emails.length,
-          relevantItems: prev.relevantItems + emails.filter(e => e.relevanceScore > 0.3).length
-        }));
+        setDatasetStats(prev => ({ ...prev, emailsLoaded: emails.length }));
         
-        // Add top relevant emails
-        const topEmails = emails.filter(e => e.relevanceScore > 0.3).slice(0, 10);
-        for (const email of topEmails) {
+        const relevantEmails = emails.filter(e => e.relevanceScore >= relevanceThreshold);
+        for (const email of relevantEmails) {
           const source: Source = {
             id: `enron_file_${Date.now()}_${email.id}`,
             type: 'email',
@@ -242,14 +339,14 @@ const DataSources: React.FC<DataSourcesProps> = ({ project, onUpdate, onContinue
         showToast({
           type: 'success',
           title: 'Enron Dataset Uploaded',
-          message: `${emails.length} emails parsed, ${topEmails.length} high-relevance items added`
+          message: `${emails.length} emails parsed, ${relevantEmails.length} above threshold added`
         });
 
       } else if (activeDatasetUpload === 'ami' || activeDatasetUpload === 'meetingTranscripts') {
         const meetings = await DatasetLoader.loadAMIMeetings({ fromFile: file });
         setLoadedDatasets(prev => ({ ...prev, ami: meetings }));
         
-        for (const meeting of meetings.slice(0, 5)) {
+        for (const meeting of meetings) {
           const source: Source = {
             id: `ami_file_${Date.now()}_${meeting.id}`,
             type: 'meeting',
@@ -299,10 +396,13 @@ const DataSources: React.FC<DataSourcesProps> = ({ project, onUpdate, onContinue
     try {
       const slackMessages = await DatasetLoader.generateSyntheticSlackFromEnron(
         loadedDatasets.enron,
-        { channelName: '#project-requirements', limit: 20 }
+        { channelName: '#project-requirements', limit: 50 }
       );
 
-      for (const msg of slackMessages.slice(0, 5)) {
+      setLoadedDatasets(prev => ({ ...prev, slack: slackMessages }));
+      setDatasetStats(prev => ({ ...prev, slackLoaded: slackMessages.length }));
+
+      for (const msg of slackMessages) {
         const source: Source = {
           id: `slack_synthetic_${Date.now()}_${msg.id}`,
           type: 'slack',
@@ -319,7 +419,7 @@ const DataSources: React.FC<DataSourcesProps> = ({ project, onUpdate, onContinue
       showToast({
         type: 'success',
         title: 'Synthetic Slack Generated',
-        message: `${slackMessages.length} Slack-style messages created from emails`
+        message: `${slackMessages.length} Slack-style messages created and added as sources`
       });
     } catch (error: any) {
       showToast({
@@ -332,22 +432,69 @@ const DataSources: React.FC<DataSourcesProps> = ({ project, onUpdate, onContinue
     }
   };
 
+  // Re-apply threshold when user changes it
+  const handleApplyThreshold = async () => {
+    if (!loadedDatasets.enron) return;
+    
+    // Remove old enron sources
+    const nonEnronSources = project.sources.filter(s => !s.fileType?.includes('enron'));
+    
+    // Add emails above new threshold (exclude spam/auto)
+    const relevantEmails = loadedDatasets.enron.filter(e => !e.isNoise && e.relevanceScore >= relevanceThreshold);
+    const spamFiltered = loadedDatasets.enron.filter(e => e.isNoise).length;
+    
+    // Clear and re-add
+    let updatedProject = { ...project, sources: nonEnronSources };
+    
+    for (const email of relevantEmails) {
+      const source: Source = {
+        id: `enron_${Date.now()}_${email.id}`,
+        type: 'email',
+        name: email.subject.slice(0, 50) + (email.subject.length > 50 ? '...' : ''),
+        status: 'active',
+        timestamp: email.date || new Date().toISOString(),
+        content: `From: ${email.from}\nTo: ${email.to.join(', ')}\nDate: ${email.date}\nSubject: ${email.subject}\n\n${email.body}`,
+        fileType: 'email/enron'
+      };
+      updatedProject = { ...updatedProject, sources: [...updatedProject.sources, source] };
+    }
+    
+    onUpdate(updatedProject);
+    
+    showToast({
+      type: 'success',
+      title: 'Threshold Applied',
+      message: `${relevantEmails.length} emails now above ${Math.round(relevanceThreshold * 100)}% threshold (${spamFiltered} spam excluded)`
+    });
+  };
+
   const connectedCount = project.sources.length;
   const realDatasets = getAllDatasets();
-  // Count datasets that are either loaded in local state OR already persisted in project sources
-  const loadedDatasetsCount = realDatasets.filter(ds => {
-    const isLoadedLocal = Boolean(
-      (ds.id === 'enron' && loadedDatasets.enron?.length) ||
-      (ds.id === 'ami' && loadedDatasets.ami?.length) ||
-      (ds.id === 'meetingTranscripts' && loadedDatasets.transcripts?.length)
+
+  // Filter data based on search
+  const filterBySearch = <T extends { subject?: string; body?: string; scenario?: string; title?: string; content?: string }>(items: T[]) => {
+    if (!searchQuery) return items;
+    const q = searchQuery.toLowerCase();
+    return items.filter(item => 
+      (item.subject?.toLowerCase().includes(q)) ||
+      (item.body?.toLowerCase().includes(q)) ||
+      (item.scenario?.toLowerCase().includes(q)) ||
+      (item.title?.toLowerCase().includes(q)) ||
+      (item.content?.toLowerCase().includes(q))
     );
-    const isLoadedPersisted = alreadyLoadedDatasets.includes(ds.id);
-    return isLoadedLocal || isLoadedPersisted;
-  }).length;
+  };
+
+  const tabs: { id: TabType; label: string; icon: React.ReactNode; count?: number }[] = [
+    { id: 'overview', label: 'Overview', icon: <Database className="h-4 w-4" /> },
+    { id: 'enron', label: 'Enron Emails', icon: <Mail className="h-4 w-4" />, count: loadedDatasets.enron?.length || sourceStats.emailsUsed },
+    { id: 'ami', label: 'AMI Meetings', icon: <Video className="h-4 w-4" />, count: loadedDatasets.ami?.length || sourceStats.meetings },
+    { id: 'transcripts', label: 'Transcripts', icon: <FileText className="h-4 w-4" />, count: loadedDatasets.transcripts?.length || sourceStats.transcripts },
+    { id: 'slack', label: 'Slack', icon: <MessageSquare className="h-4 w-4" />, count: loadedDatasets.slack?.length || sourceStats.slack },
+  ];
 
   return (
-    <div className="max-w-6xl mx-auto animate-in fade-in slide-in-from-bottom-4 duration-500 pb-20">
-      {/* Hidden file input for dataset uploads */}
+    <div className="max-w-7xl mx-auto animate-in fade-in slide-in-from-bottom-4 duration-500 pb-20">
+      {/* Hidden file input */}
       <input
         ref={datasetFileInputRef}
         type="file"
@@ -356,271 +503,436 @@ const DataSources: React.FC<DataSourcesProps> = ({ project, onUpdate, onContinue
         onChange={handleDatasetFileUpload}
       />
 
-      {/* Header Section */}
-      <div className="mb-8 lg:mb-12 text-center md:text-left flex flex-col gap-4 lg:gap-6">
-        <div className="max-w-2xl">
-          <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-blue-50 text-blue-700 text-xs font-bold uppercase tracking-wider mb-3 lg:mb-4 border border-blue-100">
-            <Database className="h-3 w-3" /> Step 2: Knowledge Ingestion
-          </div>
-          <h1 className="text-2xl sm:text-3xl lg:text-4xl font-bold text-slate-900 mb-3 lg:mb-4 tracking-tight">Load Research-Grade Datasets</h1>
-          <p className="text-base lg:text-lg text-slate-600 leading-relaxed">
-            Use authentic business communication data from academic research to build your 
-            <span className="text-blue-600 font-semibold"> Living BRD</span> with real-world emails, meetings, and chat messages.
-          </p>
+      {/* Header */}
+      <div className="mb-8">
+        <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-blue-50 text-blue-700 text-xs font-bold uppercase tracking-wider mb-3 border border-blue-100">
+          <Database className="h-3 w-3" /> Step 2: Data Sources
         </div>
-        
-        <div className="bg-white px-4 lg:px-6 py-3 lg:py-4 rounded-xl lg:rounded-2xl border border-slate-200 shadow-sm flex items-center gap-4 lg:gap-6 self-center md:self-start">
-            <div className="text-center">
-                <div className="text-xl lg:text-2xl font-bold text-slate-900">{connectedCount}</div>
-                <div className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Sources</div>
-            </div>
-            <div className="h-6 lg:h-8 w-px bg-slate-100"></div>
-            <div className="flex-1 min-w-[100px] lg:min-w-[120px]">
-                <div className="flex justify-between text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-1.5">
-                    <span>Datasets</span>
-                    <span>{loadedDatasetsCount}/{realDatasets.length}</span>
-                </div>
-                <div className="h-2 w-full bg-slate-100 rounded-full overflow-hidden">
-                    <div 
-                        className="h-full bg-purple-500 transition-all duration-1000 ease-out" 
-                        style={{ width: `${(loadedDatasetsCount / realDatasets.length) * 100}%` }}
-                    ></div>
-                </div>
-            </div>
+        <h1 className="text-3xl font-bold text-slate-900 mb-2 tracking-tight">Load & Manage Data Sources</h1>
+        <p className="text-slate-600">
+          Load research-grade datasets, set relevance thresholds, and see exactly what data is being used for BRD generation.
+        </p>
+      </div>
+
+      {/* Stats Bar */}
+      <div className="grid grid-cols-2 md:grid-cols-6 gap-4 mb-8">
+        <div className="bg-white p-4 rounded-xl border border-slate-200 shadow-sm">
+          <div className="text-2xl font-bold text-blue-600">{connectedCount}</div>
+          <div className="text-xs text-slate-500 font-medium">Total Sources</div>
+        </div>
+        <div className="bg-white p-4 rounded-xl border border-slate-200 shadow-sm">
+          <div className="text-2xl font-bold text-emerald-600">{sourceStats.emailsUsed}</div>
+          <div className="text-xs text-slate-500 font-medium">Emails Used</div>
+        </div>
+        <div className="bg-white p-4 rounded-xl border border-slate-200 shadow-sm">
+          <div className="text-2xl font-bold text-red-400">{emailStats.noise}</div>
+          <div className="text-xs text-slate-500 font-medium">Spam/Auto</div>
+        </div>
+        <div className="bg-white p-4 rounded-xl border border-slate-200 shadow-sm">
+          <div className="text-2xl font-bold text-slate-400">{emailStats.lowRelevance}</div>
+          <div className="text-xs text-slate-500 font-medium">Low Relevance</div>
+        </div>
+        <div className="bg-white p-4 rounded-xl border border-slate-200 shadow-sm">
+          <div className="text-2xl font-bold text-teal-600">{sourceStats.meetings}</div>
+          <div className="text-xs text-slate-500 font-medium">Meetings</div>
+        </div>
+        <div className="bg-white p-4 rounded-xl border border-slate-200 shadow-sm">
+          <div className="text-2xl font-bold text-purple-600">{sourceStats.slack}</div>
+          <div className="text-xs text-slate-500 font-medium">Slack Messages</div>
         </div>
       </div>
 
-      {/* ================================================================== */}
-      {/* REAL DATASETS SECTION - Research-Grade Data Sources */}
-      {/* ================================================================== */}
-      <div className="mb-16">
-        <div className="flex items-center justify-between mb-8">
-          {datasetStats.relevantItems > 0 && (
-            <div className="bg-gradient-to-r from-emerald-50 to-blue-50 px-6 py-4 rounded-2xl border border-emerald-100">
-              <div className="flex items-center gap-6">
-                <div className="text-center">
-                  <div className="text-xl font-bold text-emerald-600">{datasetStats.emailsLoaded}</div>
-                  <div className="text-[10px] font-bold text-slate-400 uppercase">Emails</div>
+      {/* Threshold Control */}
+      <div className="bg-gradient-to-r from-blue-50 to-purple-50 p-6 rounded-2xl border border-blue-100 mb-8">
+        <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
+          <div className="flex items-center gap-3">
+            <div className="p-2 bg-white rounded-xl border border-blue-200">
+              <SlidersHorizontal className="h-5 w-5 text-blue-600" />
+            </div>
+            <div>
+              <h3 className="font-bold text-slate-900">Relevance Threshold</h3>
+              <p className="text-sm text-slate-600">Emails above this threshold are used as sources</p>
+            </div>
+          </div>
+          <div className="flex items-center gap-4">
+            <div className="flex items-center gap-3 bg-white px-4 py-2 rounded-xl border border-slate-200">
+              <input
+                type="range"
+                min="0"
+                max="100"
+                value={relevanceThreshold * 100}
+                onChange={(e) => setRelevanceThreshold(Number(e.target.value) / 100)}
+                className="w-32 accent-blue-600"
+              />
+              <span className="text-lg font-bold text-blue-600 min-w-[3rem]">
+                {Math.round(relevanceThreshold * 100)}%
+              </span>
+            </div>
+            <Button
+              variant="primary"
+              size="sm"
+              onClick={handleApplyThreshold}
+              disabled={!loadedDatasets.enron}
+              className="rounded-xl"
+            >
+              Apply Threshold
+            </Button>
+          </div>
+        </div>
+        {loadedDatasets.enron && (
+          <div className="mt-4 flex items-center gap-4 text-sm flex-wrap">
+            <span className="text-slate-600">
+              With {Math.round(relevanceThreshold * 100)}% threshold:
+            </span>
+            <span className="px-2 py-1 bg-emerald-100 text-emerald-700 rounded-lg font-medium">
+              {emailStats.relevant} emails will be used
+            </span>
+            <span className="px-2 py-1 bg-slate-100 text-slate-500 rounded-lg font-medium">
+              {emailStats.lowRelevance} low relevance
+            </span>
+            <span className="px-2 py-1 bg-red-100 text-red-500 rounded-lg font-medium">
+              {emailStats.noise} spam/auto filtered
+            </span>
+          </div>
+        )}
+      </div>
+
+      {/* Dataset Loaders */}
+      <div className="grid md:grid-cols-4 gap-4 mb-8">
+        {realDatasets.map((dataset) => {
+          const isLoaded = alreadyLoadedDatasets.includes(dataset.id);
+          const isLoading = isLoadingDataset === dataset.id;
+          
+          return (
+            <div 
+              key={dataset.id}
+              className={`bg-white p-4 rounded-xl border-2 transition-all ${
+                isLoaded ? 'border-emerald-200 bg-emerald-50/30' : 'border-slate-100 hover:border-blue-200'
+              }`}
+            >
+              <div className="flex items-center gap-3 mb-3">
+                <div className={`p-2 rounded-lg ${
+                  dataset.id === 'enron' ? 'bg-blue-100 text-blue-600' :
+                  dataset.id === 'ami' ? 'bg-emerald-100 text-emerald-600' :
+                  'bg-orange-100 text-orange-600'
+                }`}>
+                  {dataset.id === 'enron' ? <Mail className="h-5 w-5" /> :
+                   dataset.id === 'ami' ? <Video className="h-5 w-5" /> :
+                   <FileText className="h-5 w-5" />}
                 </div>
-                <div className="text-center">
-                  <div className="text-xl font-bold text-blue-600">{datasetStats.meetingsLoaded}</div>
-                  <div className="text-[10px] font-bold text-slate-400 uppercase">Meetings</div>
+                <div className="flex-1 min-w-0">
+                  <h4 className="font-semibold text-slate-900 text-sm truncate">{dataset.name}</h4>
+                  <p className="text-xs text-slate-500">{dataset.recordCount}</p>
                 </div>
-                <div className="text-center">
-                  <div className="text-xl font-bold text-purple-600">{datasetStats.relevantItems}</div>
-                  <div className="text-[10px] font-bold text-slate-400 uppercase">Relevant</div>
+                {isLoaded && <Check className="h-5 w-5 text-emerald-600" />}
+              </div>
+              <Button
+                variant={isLoaded ? "outline" : "primary"}
+                size="sm"
+                className={`w-full rounded-lg text-xs ${isLoaded ? 'border-emerald-200 text-emerald-600' : ''}`}
+                onClick={() => !isLoaded && handleLoadSampleDataset(dataset.id)}
+                disabled={isLoading || !!isLoadingDataset || isLoaded}
+              >
+                {isLoading ? <Loader className="h-3 w-3 animate-spin mr-1" /> : null}
+                {isLoaded ? 'Loaded' : isLoading ? 'Loading...' : 'Load Dataset'}
+              </Button>
+            </div>
+          );
+        })}
+        
+        {/* Generate Slack Card */}
+        <div className={`bg-white p-4 rounded-xl border-2 transition-all ${
+          alreadyLoadedDatasets.includes('synthetic_slack') ? 'border-purple-200 bg-purple-50/30' : 'border-slate-100 hover:border-purple-200'
+        }`}>
+          <div className="flex items-center gap-3 mb-3">
+            <div className="p-2 rounded-lg bg-purple-100 text-purple-600">
+              <MessageSquare className="h-5 w-5" />
+            </div>
+            <div className="flex-1 min-w-0">
+              <h4 className="font-semibold text-slate-900 text-sm">Synthetic Slack</h4>
+              <p className="text-xs text-slate-500">From Enron emails</p>
+            </div>
+            {alreadyLoadedDatasets.includes('synthetic_slack') && <Check className="h-5 w-5 text-purple-600" />}
+          </div>
+          <Button
+            variant={alreadyLoadedDatasets.includes('synthetic_slack') ? "outline" : "primary"}
+            size="sm"
+            className={`w-full rounded-lg text-xs ${alreadyLoadedDatasets.includes('synthetic_slack') ? 'border-purple-200 text-purple-600' : ''}`}
+            onClick={handleGenerateSyntheticSlack}
+            disabled={!loadedDatasets.enron || isLoadingDataset === 'synthetic_slack' || alreadyLoadedDatasets.includes('synthetic_slack')}
+          >
+            {isLoadingDataset === 'synthetic_slack' ? <Loader className="h-3 w-3 animate-spin mr-1" /> : null}
+            {alreadyLoadedDatasets.includes('synthetic_slack') ? 'Generated' : 'Generate'}
+          </Button>
+        </div>
+      </div>
+
+      {/* Tabs */}
+      <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
+        {/* Tab Headers */}
+        <div className="flex border-b border-slate-200 bg-slate-50 overflow-x-auto">
+          {tabs.map((tab) => (
+            <button
+              key={tab.id}
+              onClick={() => setActiveTab(tab.id)}
+              className={`flex items-center gap-2 px-5 py-3 text-sm font-medium transition-all border-b-2 -mb-px whitespace-nowrap ${
+                activeTab === tab.id 
+                  ? 'border-blue-600 text-blue-600 bg-white' 
+                  : 'border-transparent text-slate-500 hover:text-slate-700'
+              }`}
+            >
+              {tab.icon}
+              {tab.label}
+              {tab.count !== undefined && tab.count > 0 && (
+                <span className={`px-2 py-0.5 rounded-full text-xs font-bold ${
+                  activeTab === tab.id ? 'bg-blue-100 text-blue-700' : 'bg-slate-200 text-slate-600'
+                }`}>
+                  {tab.count}
+                </span>
+              )}
+            </button>
+          ))}
+        </div>
+
+        {/* Tab Content */}
+        <div className="p-6">
+          {/* Search & Filter Bar */}
+          {activeTab !== 'overview' && (
+            <div className="flex items-center gap-4 mb-6">
+              <div className="flex-1 relative">
+                <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-slate-400" />
+                <input
+                  type="text"
+                  placeholder="Search data..."
+                  value={searchQuery}
+                  onChange={(e) => setSearchQuery(e.target.value)}
+                  className="w-full pl-10 pr-4 py-2 border border-slate-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500"
+                />
+                {searchQuery && (
+                  <button 
+                    onClick={() => setSearchQuery('')}
+                    className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600"
+                  >
+                    <X className="h-4 w-4" />
+                  </button>
+                )}
+              </div>
+              <button
+                onClick={() => setShowOnlyUsed(!showOnlyUsed)}
+                className={`flex items-center gap-2 px-4 py-2 rounded-xl border text-sm font-medium transition-all ${
+                  showOnlyUsed 
+                    ? 'bg-emerald-50 border-emerald-200 text-emerald-700' 
+                    : 'bg-white border-slate-200 text-slate-600 hover:border-slate-300'
+                }`}
+              >
+                {showOnlyUsed ? <Eye className="h-4 w-4" /> : <EyeOff className="h-4 w-4" />}
+                {showOnlyUsed ? 'Showing Used Only' : 'Show All'}
+              </button>
+            </div>
+          )}
+
+          {/* Overview Tab */}
+          {activeTab === 'overview' && (
+            <div className="space-y-6">
+              <div className="grid md:grid-cols-2 gap-6">
+                {/* Data Pipeline Visual */}
+                <div className="bg-slate-50 rounded-xl p-6">
+                  <h3 className="font-bold text-slate-900 mb-4">Data Pipeline</h3>
+                  <div className="space-y-4">
+                    <div className="flex items-center gap-3">
+                      <div className="w-8 h-8 rounded-full bg-blue-100 text-blue-600 flex items-center justify-center font-bold text-sm">1</div>
+                      <div className="flex-1">
+                        <div className="text-sm font-medium text-slate-700">Load Datasets</div>
+                        <div className="text-xs text-slate-500">{realDatasets.filter(d => alreadyLoadedDatasets.includes(d.id)).length}/{realDatasets.length} loaded</div>
+                      </div>
+                      {alreadyLoadedDatasets.length > 0 && <Check className="h-5 w-5 text-emerald-600" />}
+                    </div>
+                    <div className="flex items-center gap-3">
+                      <div className="w-8 h-8 rounded-full bg-purple-100 text-purple-600 flex items-center justify-center font-bold text-sm">2</div>
+                      <div className="flex-1">
+                        <div className="text-sm font-medium text-slate-700">Filter by Relevance</div>
+                        <div className="text-xs text-slate-500">Threshold: {Math.round(relevanceThreshold * 100)}%</div>
+                      </div>
+                      <Filter className="h-5 w-5 text-purple-600" />
+                    </div>
+                    <div className="flex items-center gap-3">
+                      <div className="w-8 h-8 rounded-full bg-emerald-100 text-emerald-600 flex items-center justify-center font-bold text-sm">3</div>
+                      <div className="flex-1">
+                        <div className="text-sm font-medium text-slate-700">Use as Sources</div>
+                        <div className="text-xs text-slate-500">{connectedCount} sources active</div>
+                      </div>
+                      {connectedCount > 0 && <Check className="h-5 w-5 text-emerald-600" />}
+                    </div>
+                  </div>
+                </div>
+
+                {/* Source Breakdown */}
+                <div className="bg-slate-50 rounded-xl p-6">
+                  <h3 className="font-bold text-slate-900 mb-4">Source Breakdown</h3>
+                  <div className="space-y-3">
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-2">
+                        <Mail className="h-4 w-4 text-blue-600" />
+                        <span className="text-sm text-slate-700">Enron Emails</span>
+                      </div>
+                      <span className="font-bold text-slate-900">{project.sources.filter(s => s.fileType?.includes('enron')).length}</span>
+                    </div>
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-2">
+                        <Video className="h-4 w-4 text-emerald-600" />
+                        <span className="text-sm text-slate-700">AMI Meetings</span>
+                      </div>
+                      <span className="font-bold text-slate-900">{project.sources.filter(s => s.fileType?.includes('ami')).length}</span>
+                    </div>
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-2">
+                        <FileText className="h-4 w-4 text-orange-600" />
+                        <span className="text-sm text-slate-700">Transcripts</span>
+                      </div>
+                      <span className="font-bold text-slate-900">{project.sources.filter(s => s.fileType?.includes('transcript')).length}</span>
+                    </div>
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-2">
+                        <MessageSquare className="h-4 w-4 text-purple-600" />
+                        <span className="text-sm text-slate-700">Slack Messages</span>
+                      </div>
+                      <span className="font-bold text-slate-900">{project.sources.filter(s => s.fileType?.includes('slack') || s.fileType?.includes('chat')).length}</span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              {/* Privacy & Transparency */}
+              <div className="grid sm:grid-cols-3 gap-4">
+                <div className="bg-slate-50 p-4 rounded-xl border border-slate-100">
+                  <div className="flex items-center gap-2 mb-2 text-blue-600">
+                    <ShieldCheck className="h-4 w-4" />
+                    <h4 className="font-semibold text-slate-900 text-sm">Privacy First</h4>
+                  </div>
+                  <p className="text-xs text-slate-500">Data encrypted at rest and in transit.</p>
+                </div>
+                <div className="bg-slate-50 p-4 rounded-xl border border-slate-100">
+                  <div className="flex items-center gap-2 mb-2 text-emerald-600">
+                    <Check className="h-4 w-4" />
+                    <h4 className="font-semibold text-slate-900 text-sm">Traceability</h4>
+                  </div>
+                  <p className="text-xs text-slate-500">Every requirement links back to source.</p>
+                </div>
+                <div className="bg-slate-50 p-4 rounded-xl border border-slate-100">
+                  <div className="flex items-center gap-2 mb-2 text-orange-600">
+                    <Info className="h-4 w-4" />
+                    <h4 className="font-semibold text-slate-900 text-sm">AI Verification</h4>
+                  </div>
+                  <p className="text-xs text-slate-500">Ambiguous items flagged for review.</p>
                 </div>
               </div>
             </div>
           )}
-        </div>
 
-        <div className="grid md:grid-cols-3 gap-6 mb-8">
-          {realDatasets.map((dataset) => {
-            // Check both local state and persisted project sources
-            const isLoadedLocal = Boolean(
-              (dataset.id === 'enron' && loadedDatasets.enron?.length) ||
-              (dataset.id === 'ami' && loadedDatasets.ami?.length) ||
-              (dataset.id === 'meetingTranscripts' && loadedDatasets.transcripts?.length)
-            );
-            const isLoadedPersisted = alreadyLoadedDatasets.includes(dataset.id);
-            const isLoaded = isLoadedLocal || isLoadedPersisted;
-            const isLoading = isLoadingDataset === dataset.id;
-            
-            // Get loaded count for this dataset
-            const loadedCount = dataset.id === 'enron' ? loadedDatasets.enron?.length || 0 :
-                               dataset.id === 'ami' ? loadedDatasets.ami?.length || 0 :
-                               loadedDatasets.transcripts?.length || 0;
-            
-            return (
-              <div 
-                key={dataset.id}
-                className={`bg-white p-6 rounded-2xl border-2 transition-all duration-300 ${
-                  isLoaded ? 'border-emerald-200 shadow-md shadow-emerald-100' : 'border-slate-100 hover:border-purple-100 hover:shadow-lg'
-                }`}
-              >
-                {/* Header */}
-                <div className="flex items-start justify-between mb-4">
-                  <div className={`p-3 rounded-xl ${
-                    dataset.id === 'enron' ? 'bg-blue-50 text-blue-600' :
-                    dataset.id === 'ami' ? 'bg-emerald-50 text-emerald-600' :
-                    'bg-orange-50 text-orange-600'
-                  }`}>
-                    {dataset.id === 'enron' ? <Mail className="h-6 w-6" /> :
-                     dataset.id === 'ami' ? <Video className="h-6 w-6" /> :
-                     <FileText className="h-6 w-6" />}
-                  </div>
-                  {isLoaded && (
-                    <div className="bg-emerald-500 text-white p-1.5 rounded-full">
-                      <Check className="h-4 w-4" />
-                    </div>
-                  )}
+          {/* Enron Emails Tab */}
+          {activeTab === 'enron' && (
+            <div>
+              {!loadedDatasets.enron ? (
+                <div className="text-center py-12">
+                  <Mail className="h-12 w-12 text-slate-300 mx-auto mb-4" />
+                  <p className="text-slate-500">Load the Enron dataset to see emails here</p>
                 </div>
-
-                {/* Info */}
-                <h3 className="font-bold text-slate-900 text-lg mb-2">{dataset.name}</h3>
-                <p className="text-sm text-slate-500 mb-4 line-clamp-2">{dataset.description}</p>
-
-                {/* Metadata */}
-                <div className="flex flex-wrap gap-2 mb-4">
-                  <span className="px-2 py-1 bg-slate-50 text-slate-600 text-xs rounded-lg font-medium">
-                    {dataset.recordCount}
-                  </span>
-                  <span className="px-2 py-1 bg-slate-50 text-slate-600 text-xs rounded-lg font-medium">
-                    {dataset.license}
-                  </span>
-                  {isLoaded && (
-                    <span className="px-2 py-1 bg-emerald-100 text-emerald-700 text-xs rounded-lg font-bold flex items-center gap-1">
-                      <Database className="h-3 w-3" />
-                      {loadedCount > 0 ? `${loadedCount} Loaded` : 'Real Data'}
-                    </span>
-                  )}
-                </div>
-
-                {/* Usage Notes */}
-                <div className="mb-4">
-                  <div className="text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-2">Ideal For:</div>
-                  <div className="flex flex-wrap gap-1">
-                    {dataset.idealFor.slice(0, 2).map((use, i) => (
-                      <span key={i} className="px-2 py-0.5 bg-purple-50 text-purple-600 text-xs rounded font-medium">
-                        {use}
-                      </span>
-                    ))}
-                  </div>
-                </div>
-
-                {/* Actions */}
-                <div className="flex gap-2 pt-4 border-t border-slate-50">
-                  <Button
-                    variant={isLoaded ? "outline" : "primary"}
-                    size="sm"
-                    className={`flex-1 rounded-xl ${isLoaded ? 'border-emerald-200 text-emerald-600 cursor-default' : ''}`}
-                    onClick={() => !isLoaded && handleLoadSampleDataset(dataset.id)}
-                    disabled={isLoading || !!isLoadingDataset || isLoaded}
-                  >
-                    {isLoading ? (
-                      <>
-                        <Loader className="h-4 w-4 animate-spin mr-2" />
-                        Loading...
-                      </>
-                    ) : isLoaded ? (
-                      <>
-                        <Check className="h-4 w-4 mr-2" />
-                        Already Loaded
-                      </>
-                    ) : (
-                      <>
-                        <Zap className="h-4 w-4 mr-2" />
-                        Load Sample
-                      </>
-                    )}
-                  </Button>
-                  {!isLoaded && (
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      className="rounded-xl"
-                      onClick={() => {
-                        setActiveDatasetUpload(dataset.id);
-                        datasetFileInputRef.current?.click();
-                      }}
-                      disabled={isLoading}
-                    >
-                      <UploadCloud className="h-4 w-4" />
-                    </Button>
-                  )}
-                  <a
-                    href={dataset.downloadUrl}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="p-2 border border-slate-200 rounded-xl hover:bg-slate-50 transition-colors"
-                  >
-                    <ExternalLink className="h-4 w-4 text-slate-500" />
-                  </a>
-                </div>
-              </div>
-            );
-          })}
-        </div>
-
-        {/* Loaded Data Preview */}
-        {(loadedDatasets.enron?.length || loadedDatasets.ami?.length) && (
-          <div className="bg-white rounded-2xl border border-slate-200 p-6 mb-8">
-            <div className="flex items-center gap-2 mb-4">
-              <Database className="h-5 w-5 text-purple-600" />
-              <h3 className="font-bold text-slate-900">Loaded Data Preview</h3>
-              <span className="px-2 py-0.5 bg-emerald-100 text-emerald-700 text-xs rounded-full font-medium">
-                Real Data Active
-              </span>
-            </div>
-
-            {/* Enron Emails Preview */}
-            {loadedDatasets.enron && loadedDatasets.enron.length > 0 && (
-              <div className="mb-6">
-                <div className="flex items-center gap-2 mb-3">
-                  <Mail className="h-4 w-4 text-blue-600" />
-                  <span className="font-semibold text-slate-800">Enron Corporate Emails</span>
-                  <span className="text-xs text-slate-500">({loadedDatasets.enron.length} emails)</span>
-                </div>
-                <div className="space-y-2 max-h-64 overflow-y-auto">
-                  {loadedDatasets.enron.slice(0, 5).map((email, idx) => (
-                    <div key={email.id || idx} className="bg-slate-50 rounded-lg p-3 text-sm border border-slate-100">
-                      <div className="flex items-start justify-between gap-2 mb-1">
-                        <span className="font-medium text-slate-800 truncate flex-1">
-                          {email.subject || '(No Subject)'}
-                        </span>
-                        <span className={`px-1.5 py-0.5 rounded text-[10px] font-bold ${
-                          email.relevanceScore > 0.5 ? 'bg-emerald-100 text-emerald-700' :
-                          email.relevanceScore > 0.3 ? 'bg-yellow-100 text-yellow-700' :
-                          'bg-slate-200 text-slate-600'
-                        }`}>
-                          {Math.round(email.relevanceScore * 100)}% relevant
-                        </span>
-                      </div>
-                      <div className="text-xs text-slate-500 mb-1">
-                        <span className="font-medium">From:</span> {email.from} | 
-                        <span className="font-medium"> To:</span> {email.to?.slice(0, 2).join(', ')}{email.to?.length > 2 ? ` +${email.to.length - 2}` : ''}
-                      </div>
-                      <p className="text-xs text-slate-600 line-clamp-2">
-                        {email.body?.slice(0, 150)}...
-                      </p>
-                      {(email.hasProjectKeywords || email.hasDecisionKeywords || email.hasDeadlineKeywords) && (
-                        <div className="flex gap-1 mt-2">
-                          {email.hasProjectKeywords && <span className="px-1.5 py-0.5 bg-blue-100 text-blue-700 text-[10px] rounded">Project</span>}
-                          {email.hasDecisionKeywords && <span className="px-1.5 py-0.5 bg-purple-100 text-purple-700 text-[10px] rounded">Decision</span>}
-                          {email.hasDeadlineKeywords && <span className="px-1.5 py-0.5 bg-orange-100 text-orange-700 text-[10px] rounded">Deadline</span>}
+              ) : (
+                <div className="space-y-2 max-h-[600px] overflow-y-auto">
+                  {filterBySearch(loadedDatasets.enron)
+                    .filter(email => !showOnlyUsed || email.relevanceScore >= relevanceThreshold)
+                    .map((email, idx) => {
+                      const isUsed = email.relevanceScore >= relevanceThreshold && !email.isNoise;
+                      const classification = email.classification || (email.isNoise ? 'noise' : email.relevanceScore >= 0.7 ? 'high-relevance' : email.relevanceScore >= 0.5 ? 'relevant' : 'low-relevance');
+                      return (
+                        <div 
+                          key={email.id || idx}
+                          className={`p-4 rounded-xl border transition-all ${
+                            email.isNoise ? 'bg-red-50/50 border-red-200 opacity-50' :
+                            isUsed 
+                              ? 'bg-emerald-50 border-emerald-200' 
+                              : 'bg-slate-50 border-slate-100 opacity-60'
+                          }`}
+                        >
+                          <div className="flex items-start justify-between gap-3 mb-2">
+                            <div className="flex items-center gap-2 flex-1 min-w-0">
+                              {email.isNoise ? (
+                                <Tooltip content={email.noiseReason || 'Auto-generated or spam email'}>
+                                  <span className="shrink-0 px-2 py-0.5 bg-red-400 text-white text-[10px] font-bold rounded uppercase flex items-center gap-1 cursor-help">
+                                    <AlertCircle className="h-3 w-3" /> Spam/Auto
+                                  </span>
+                                </Tooltip>
+                              ) : isUsed ? (
+                                <span className="shrink-0 px-2 py-0.5 bg-emerald-500 text-white text-[10px] font-bold rounded uppercase flex items-center gap-1">
+                                  <Check className="h-3 w-3" /> Used
+                                </span>
+                              ) : (
+                                <span className="shrink-0 px-2 py-0.5 bg-slate-300 text-slate-600 text-[10px] font-bold rounded uppercase">
+                                  Low Relevance
+                                </span>
+                              )}
+                              <span className={`font-medium truncate ${email.isNoise ? 'text-red-400' : isUsed ? 'text-slate-800' : 'text-slate-500'}`}>
+                                {email.subject || '(No Subject)'}
+                              </span>
+                            </div>
+                            <span className={`shrink-0 px-2 py-0.5 rounded text-xs font-bold ${
+                              email.relevanceScore >= 0.7 ? 'bg-emerald-100 text-emerald-700' :
+                              email.relevanceScore >= 0.5 ? 'bg-yellow-100 text-yellow-700' :
+                              email.relevanceScore >= 0.3 ? 'bg-orange-100 text-orange-700' :
+                              'bg-slate-200 text-slate-500'
+                            }`}>
+                              {Math.round(email.relevanceScore * 100)}%
+                            </span>
+                          </div>
+                          <div className={`text-xs mb-2 ${isUsed ? 'text-slate-600' : 'text-slate-400'}`}>
+                            <span className="font-medium">From:</span> {email.from} → <span className="font-medium">To:</span> {email.to?.slice(0, 2).join(', ')}{email.to?.length > 2 ? ` +${email.to.length - 2}` : ''}
+                          </div>
+                          {isUsed && (
+                            <>
+                              <p className="text-xs text-slate-600 line-clamp-2 mb-2">
+                                {email.body?.slice(0, 200)}...
+                              </p>
+                              <div className="flex gap-1">
+                                {email.hasProjectKeywords && <span className="px-1.5 py-0.5 bg-blue-100 text-blue-700 text-[10px] rounded">Project</span>}
+                                {email.hasDecisionKeywords && <span className="px-1.5 py-0.5 bg-purple-100 text-purple-700 text-[10px] rounded">Decision</span>}
+                                {email.hasDeadlineKeywords && <span className="px-1.5 py-0.5 bg-orange-100 text-orange-700 text-[10px] rounded">Deadline</span>}
+                              </div>
+                            </>
+                          )}
                         </div>
-                      )}
-                    </div>
-                  ))}
-                  {loadedDatasets.enron.length > 5 && (
-                    <div className="text-center text-xs text-slate-500 py-2">
-                      ... and {loadedDatasets.enron.length - 5} more emails
-                    </div>
-                  )}
+                      );
+                    })}
                 </div>
-              </div>
-            )}
+              )}
+            </div>
+          )}
 
-            {/* AMI Meetings Preview */}
-            {loadedDatasets.ami && loadedDatasets.ami.length > 0 && (
-              <div>
-                <div className="flex items-center gap-2 mb-3">
-                  <Video className="h-4 w-4 text-emerald-600" />
-                  <span className="font-semibold text-slate-800">Meeting Transcripts</span>
-                  <span className="text-xs text-slate-500">({loadedDatasets.ami.length} meetings)</span>
+          {/* AMI Meetings Tab */}
+          {activeTab === 'ami' && (
+            <div>
+              {!loadedDatasets.ami ? (
+                <div className="text-center py-12">
+                  <Video className="h-12 w-12 text-slate-300 mx-auto mb-4" />
+                  <p className="text-slate-500">Load the AMI corpus to see meetings here</p>
                 </div>
-                <div className="space-y-2 max-h-64 overflow-y-auto">
-                  {loadedDatasets.ami.slice(0, 5).map((meeting, idx) => (
-                    <div key={meeting.id || idx} className="bg-slate-50 rounded-lg p-3 text-sm border border-slate-100">
-                      <div className="flex items-start justify-between gap-2 mb-1">
-                        <span className="font-medium text-slate-800">
-                          {meeting.meetingId} - {meeting.scenario}
-                        </span>
-                        {meeting.summary && (
-                          <span className="px-1.5 py-0.5 bg-emerald-100 text-emerald-700 text-[10px] rounded font-bold">
-                            Has Summary
+              ) : (
+                <div className="space-y-3 max-h-[600px] overflow-y-auto">
+                  {loadedDatasets.ami.map((meeting, idx) => (
+                    <div 
+                      key={meeting.id || idx}
+                      className="p-4 rounded-xl border bg-emerald-50 border-emerald-200"
+                    >
+                      <div className="flex items-start justify-between gap-3 mb-2">
+                        <div className="flex items-center gap-2">
+                          <span className="px-2 py-0.5 bg-emerald-500 text-white text-[10px] font-bold rounded uppercase flex items-center gap-1">
+                            <Check className="h-3 w-3" /> Used
                           </span>
+                          <span className="font-medium text-slate-800">
+                            {meeting.meetingId} - {meeting.scenario}
+                          </span>
+                        </div>
+                        {meeting.summary && (
+                          <span className="px-2 py-0.5 bg-teal-100 text-teal-700 text-[10px] font-bold rounded">Has Summary</span>
                         )}
                       </div>
                       {meeting.summary && (
@@ -631,188 +943,107 @@ const DataSources: React.FC<DataSourcesProps> = ({ project, onUpdate, onContinue
                       <div className="text-xs text-slate-500">
                         <span className="font-medium">Turns:</span> {Array.isArray(meeting.transcript) ? meeting.transcript.length : 0} dialogue turns
                       </div>
-                      {Array.isArray(meeting.transcript) && meeting.transcript.length > 0 && (
-                        <div className="mt-2 pl-2 border-l-2 border-emerald-200">
-                          <p className="text-[11px] text-slate-600 italic">
-                            "{(meeting.transcript[0] as any).text?.slice(0, 100)}..."
-                          </p>
-                        </div>
-                      )}
                     </div>
                   ))}
-                  {loadedDatasets.ami.length > 5 && (
-                    <div className="text-center text-xs text-slate-500 py-2">
-                      ... and {loadedDatasets.ami.length - 5} more meetings
-                    </div>
-                  )}
                 </div>
-              </div>
-            )}
-          </div>
-        )}
-
-        {/* Multi-Channel Simulation */}
-        <div className="bg-gradient-to-r from-purple-50 via-blue-50 to-emerald-50 p-6 rounded-2xl border border-purple-100">
-          <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
-            <div>
-              <div className="flex items-center gap-2 mb-2">
-                <Sparkles className="h-5 w-5 text-purple-600" />
-                <h3 className="font-bold text-slate-900">Multi-Channel Simulation</h3>
-              </div>
-              <p className="text-sm text-slate-600">
-                Generate synthetic Slack messages from Enron emails to simulate multi-channel ingestion as specified in the problem statement.
-              </p>
-            </div>
-            <Button
-              variant="outline"
-              className={`shrink-0 ${alreadyLoadedDatasets.includes('synthetic_slack') ? 'border-emerald-200 text-emerald-600' : 'border-purple-200 text-purple-700 hover:bg-purple-100'}`}
-              onClick={handleGenerateSyntheticSlack}
-              disabled={(!loadedDatasets.enron && !alreadyLoadedDatasets.includes('enron')) || isLoadingDataset === 'synthetic_slack' || alreadyLoadedDatasets.includes('synthetic_slack')}
-            >
-              {isLoadingDataset === 'synthetic_slack' ? (
-                <>
-                  <Loader className="h-4 w-4 animate-spin mr-2" />
-                  Generating...
-                </>
-              ) : alreadyLoadedDatasets.includes('synthetic_slack') ? (
-                <>
-                  <Check className="h-4 w-4 mr-2" />
-                  Slack Generated
-                </>
-              ) : (
-                <>
-                  <MessageSquare className="h-4 w-4 mr-2" />
-                  Generate Slack from Emails
-                </>
               )}
-            </Button>
-          </div>
-          {!loadedDatasets.enron && !alreadyLoadedDatasets.includes('enron') && (
-            <p className="text-xs text-purple-500 mt-3 flex items-center gap-1">
-              <AlertCircle className="h-3 w-3" />
-              Load Enron emails first to enable synthetic Slack generation
-            </p>
+            </div>
+          )}
+
+          {/* Transcripts Tab */}
+          {activeTab === 'transcripts' && (
+            <div>
+              {!loadedDatasets.transcripts ? (
+                <div className="text-center py-12">
+                  <FileText className="h-12 w-12 text-slate-300 mx-auto mb-4" />
+                  <p className="text-slate-500">Load the transcripts dataset to see data here</p>
+                </div>
+              ) : (
+                <div className="space-y-3 max-h-[600px] overflow-y-auto">
+                  {loadedDatasets.transcripts.map((transcript, idx) => (
+                    <div 
+                      key={transcript.id || idx}
+                      className="p-4 rounded-xl border bg-orange-50 border-orange-200"
+                    >
+                      <div className="flex items-start justify-between gap-3 mb-2">
+                        <div className="flex items-center gap-2">
+                          <span className="px-2 py-0.5 bg-orange-500 text-white text-[10px] font-bold rounded uppercase flex items-center gap-1">
+                            <Check className="h-3 w-3" /> Used
+                          </span>
+                          <span className="font-medium text-slate-800">{transcript.title}</span>
+                        </div>
+                        <span className="text-xs text-slate-500">{new Date(transcript.date).toLocaleDateString()}</span>
+                      </div>
+                      <p className="text-xs text-slate-600 line-clamp-2">
+                        {transcript.transcript?.slice(0, 200)}...
+                      </p>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Slack Tab */}
+          {activeTab === 'slack' && (
+            <div>
+              {!loadedDatasets.slack ? (
+                <div className="text-center py-12">
+                  <MessageSquare className="h-12 w-12 text-slate-300 mx-auto mb-4" />
+                  <p className="text-slate-500">Generate synthetic Slack messages to see data here</p>
+                </div>
+              ) : (
+                <div className="space-y-3 max-h-[600px] overflow-y-auto">
+                  {loadedDatasets.slack.map((msg, idx) => (
+                    <div 
+                      key={msg.id || idx}
+                      className="p-4 rounded-xl border bg-purple-50 border-purple-200"
+                    >
+                      <div className="flex items-start justify-between gap-3 mb-2">
+                        <div className="flex items-center gap-2">
+                          <span className="px-2 py-0.5 bg-purple-500 text-white text-[10px] font-bold rounded uppercase flex items-center gap-1">
+                            <Check className="h-3 w-3" /> Used
+                          </span>
+                          <span className="font-medium text-slate-800">{msg.title}</span>
+                        </div>
+                        <span className={`px-2 py-0.5 rounded text-xs font-bold ${
+                          msg.relevanceScore >= 0.5 ? 'bg-emerald-100 text-emerald-700' : 'bg-slate-200 text-slate-500'
+                        }`}>
+                          {Math.round(msg.relevanceScore * 100)}%
+                        </span>
+                      </div>
+                      <p className="text-xs text-slate-600 line-clamp-2">
+                        {msg.content?.slice(0, 200)}...
+                      </p>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
           )}
         </div>
       </div>
 
-      {/* Privacy & Transparency Section */}
-      <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-4 lg:gap-8 mb-10 lg:mb-16">
-          <div className="bg-slate-50 p-6 rounded-2xl border border-slate-100">
-              <div className="flex items-center gap-3 mb-3 text-blue-600">
-                  <ShieldCheck className="h-5 w-5" />
-                  <h4 className="font-bold text-slate-900">Privacy First</h4>
-              </div>
-              <p className="text-sm text-slate-500 leading-relaxed">
-                  Your data is encrypted at rest and in transit. We only extract business requirements, never personal information.
-              </p>
-          </div>
-          <div className="bg-slate-50 p-6 rounded-2xl border border-slate-100">
-              <div className="flex items-center gap-3 mb-3 text-emerald-600">
-                  <Check className="h-5 w-5" />
-                  <h4 className="font-bold text-slate-900">Traceability</h4>
-              </div>
-              <p className="text-sm text-slate-500 leading-relaxed">
-                  Every generated requirement includes a link back to the exact source snippet, ensuring 100% accountability.
-              </p>
-          </div>
-          <div className="bg-slate-50 p-6 rounded-2xl border border-slate-100">
-              <div className="flex items-center gap-3 mb-3 text-orange-600">
-                  <Info className="h-5 w-5" />
-                  <h4 className="font-bold text-slate-900">AI Verification</h4>
-              </div>
-              <p className="text-sm text-slate-500 leading-relaxed">
-                  Our Confidence Engine flags ambiguous statements for your review instead of making assumptions.
-              </p>
-          </div>
-      </div>
-
-      {/* Connected Sources Detail (Only if sources exist) */}
-      {project.sources.length > 0 && (
-          <div className="bg-white rounded-2xl lg:rounded-[2rem] border border-slate-200 shadow-sm mb-8 lg:mb-12 animate-in fade-in slide-in-from-top-4">
-              <div className="px-4 lg:px-10 py-4 lg:py-6 border-b border-slate-100 bg-slate-50/30 flex flex-col sm:flex-row justify-between sm:items-center gap-3">
-                  <div>
-                      <h3 className="font-bold text-slate-900 text-base lg:text-lg">Active Connections</h3>
-                      <p className="text-xs text-slate-500 mt-0.5">
-                        {project.sources.filter(s => s.fileType?.includes('enron')).length} emails, {' '}
-                        {project.sources.filter(s => s.fileType?.includes('ami') || s.fileType?.includes('meeting')).length} meetings, {' '}
-                        {project.sources.filter(s => s.fileType?.includes('slack') || s.fileType?.includes('chat')).length} chat messages
-                      </p>
-                  </div>
-                  <Tooltip content="All sources are being analyzed by the AI engine.">
-                      <div className="flex items-center gap-2 text-emerald-600 text-xs font-bold bg-emerald-50 px-3 py-1.5 rounded-full border border-emerald-100 w-fit">
-                          <div className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></div>
-                          System Healthy
-                      </div>
-                  </Tooltip>
-              </div>
-              <div className="divide-y divide-slate-50 max-h-96 overflow-y-auto">
-                  {project.sources.map((source) => (
-                      <div key={source.id} className="px-4 lg:px-10 py-3 lg:py-4 flex flex-col sm:flex-row sm:items-start justify-between gap-3 hover:bg-slate-50/50 transition-colors group">
-                          <div className="flex items-start gap-3 lg:gap-4 flex-1 min-w-0">
-                              <div className="w-10 h-10 lg:w-12 lg:h-12 rounded-xl bg-white border border-slate-100 flex items-center justify-center text-slate-400 shadow-sm group-hover:border-blue-100 transition-colors shrink-0">
-                                  {source.type === 'meeting' && <Video className="h-5 w-5 text-emerald-500" />}
-                                  {source.type === 'email' && <Mail className="h-5 w-5 text-blue-500" />}
-                                  {source.type === 'jira' && <Database className="h-5 w-5 text-blue-500" />}
-                                  {source.type === 'slack' && <MessageSquare className="h-5 w-5 text-purple-500" />}
-                                  {source.type === 'chat' && <MessageSquare className="h-5 w-5 text-purple-500" />}
-                                  {source.type === 'upload' && <UploadCloud className="h-5 w-5 text-orange-500" />}
-                              </div>
-                              <div className="flex-1 min-w-0">
-                                  <div className="font-semibold text-slate-900 truncate">{source.name}</div>
-                                  <div className="text-xs text-slate-500 font-medium flex flex-wrap items-center gap-2 mt-1">
-                                    <span className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase ${
-                                      source.fileType?.includes('enron') ? 'bg-blue-100 text-blue-700' :
-                                      source.fileType?.includes('ami') ? 'bg-emerald-100 text-emerald-700' :
-                                      source.fileType?.includes('slack') || source.fileType?.includes('chat') ? 'bg-purple-100 text-purple-700' :
-                                      'bg-slate-100 text-slate-600'
-                                    }`}>{source.fileType || source.type}</span>
-                                    <span className="flex items-center gap-1 text-slate-400"><Clock className="h-3 w-3" /> {new Date(source.timestamp).toLocaleString()}</span>
-                                  </div>
-                                  {source.content && (
-                                    <p className="text-xs text-slate-500 mt-2 line-clamp-2 bg-slate-50 p-2 rounded border border-slate-100">
-                                      {source.content.slice(0, 200)}{source.content.length > 200 ? '...' : ''}
-                                    </p>
-                                  )}
-                              </div>
-                          </div>
-                          <div className="flex items-center gap-2 shrink-0 ml-4">
-                              <div className={`w-2 h-2 rounded-full ${source.status === 'active' ? 'bg-emerald-500' : 'bg-slate-300'}`}></div>
-                              <span className="text-xs text-slate-500 capitalize">{source.status}</span>
-                          </div>
-                      </div>
-                  ))}
-              </div>
-              {project.sources.length > 5 && (
-                <div className="px-10 py-3 bg-slate-50 border-t border-slate-100 text-center">
-                  <span className="text-xs text-slate-500">Showing all {project.sources.length} connected sources</span>
-                </div>
-              )}
-          </div>
-      )}
-
       {/* Footer CTA */}
-      <div className="mt-8 lg:mt-12 flex flex-col items-center gap-4 lg:gap-6">
-          {project.sources.length === 0 && (
-              <div className="flex items-center gap-2 text-orange-600 bg-orange-50 px-4 py-2 rounded-xl border border-orange-100 text-sm font-medium animate-bounce">
-                  <AlertCircle className="h-4 w-4" /> Connect at least one source to continue
-              </div>
-          )}
-          
-          <div className="w-full sm:w-auto">
-              <Button 
-                onClick={onContinue} 
-                size="lg" 
-                disabled={project.sources.length === 0}
-                className={`w-full sm:w-auto shadow-2xl h-14 lg:h-16 px-6 lg:px-10 text-base lg:text-xl font-bold rounded-xl lg:rounded-2xl transition-all transform active:scale-95 ${project.sources.length > 0 ? 'shadow-blue-500/30' : 'opacity-50 grayscale cursor-not-allowed'}`}
-              >
-                  Continue to Project Context <ArrowRight className="ml-2 lg:ml-3 h-5 lg:h-6 w-5 lg:w-6" />
-              </Button>
+      <div className="mt-8 flex flex-col items-center gap-4">
+        {project.sources.length === 0 && (
+          <div className="flex items-center gap-2 text-orange-600 bg-orange-50 px-4 py-2 rounded-xl border border-orange-100 text-sm font-medium">
+            <AlertCircle className="h-4 w-4" /> Load at least one dataset to continue
           </div>
-          
-          <p className="text-slate-400 text-xs text-center max-w-md">
-              By continuing, you agree to allow ClarityAI to process the selected data sources for the purpose of requirement generation.
-          </p>
+        )}
+        
+        <Button 
+          onClick={onContinue} 
+          size="lg" 
+          disabled={project.sources.length === 0}
+          className={`shadow-2xl h-14 px-10 text-lg font-bold rounded-2xl transition-all ${project.sources.length > 0 ? 'shadow-blue-500/30' : 'opacity-50 grayscale cursor-not-allowed'}`}
+        >
+          Continue to Project Context <ArrowRight className="ml-3 h-5 w-5" />
+        </Button>
+        
+        <p className="text-slate-400 text-xs text-center max-w-md">
+          By continuing, you agree to allow ClarityAI to process the selected data sources for requirement generation.
+        </p>
       </div>
     </div>
   );

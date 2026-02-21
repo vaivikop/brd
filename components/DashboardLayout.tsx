@@ -4,8 +4,8 @@ import DashboardHome from './DashboardHome';
 import ProjectSetup from './ProjectSetup';
 import DataSources from './DataSources';
 import ProjectContext from './ProjectContext';
-import InsightsReview from './InsightsReview';
-import BRDGeneration from './BRDGeneration';
+import InsightsReview from './InsightsReviewEnterprise';
+import BRDGenerationEnterprise from './BRDGenerationEnterprise';
 import BRDEdit from './BRDEdit';
 import GraphView from './GraphView';
 import ConflictDetection from './ConflictDetection';
@@ -20,11 +20,21 @@ const DashboardLayout: React.FC = () => {
   const [activeTab, setActiveTab] = useState('dashboard');
   const [project, setProject] = useState<ProjectState | null>(null);
   const [loading, setLoading] = useState(true);
-  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(() => {
+    const saved = localStorage.getItem('clarityai_sidebar_collapsed');
+    return saved === 'true';
+  });
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [lastRefresh, setLastRefresh] = useState<Date>(new Date());
   const [loadError, setLoadError] = useState<string | null>(null);
+
+  // Persist sidebar collapsed state
+  const handleToggleSidebar = () => {
+    const newState = !sidebarCollapsed;
+    setSidebarCollapsed(newState);
+    localStorage.setItem('clarityai_sidebar_collapsed', String(newState));
+  };
 
   const fetchProject = useCallback(async (showRefreshIndicator = false) => {
     if (showRefreshIndicator) {
@@ -109,7 +119,7 @@ const DashboardLayout: React.FC = () => {
         activeTab={activeTab} 
         setActiveTab={setActiveTab} 
         collapsed={sidebarCollapsed}
-        onToggleCollapse={() => setSidebarCollapsed(!sidebarCollapsed)}
+        onToggleCollapse={handleToggleSidebar}
         mobileOpen={mobileMenuOpen}
         onCloseMobile={() => setMobileMenuOpen(false)}
       />
@@ -177,14 +187,16 @@ const DashboardLayout: React.FC = () => {
           )}
 
           {activeTab === 'generate' && (
-              <BRDGeneration 
-                project={project} 
-                onUpdate={setProject}
-                onContinue={() => setActiveTab('dashboard')}
-                onEdit={() => setActiveTab('edit-brd')}
-                onNavigateToGraph={() => setActiveTab('graph')}
-                onNavigateToInsights={() => setActiveTab('insights')}
-              />
+              <ErrorBoundary>
+                <BRDGenerationEnterprise 
+                  project={project} 
+                  onUpdate={setProject}
+                  onContinue={() => setActiveTab('dashboard')}
+                  onEdit={() => setActiveTab('edit-brd')}
+                  onNavigateToGraph={() => setActiveTab('graph')}
+                  onNavigateToInsights={() => setActiveTab('insights')}
+                />
+              </ErrorBoundary>
           )}
 
           {activeTab === 'edit-brd' && (
