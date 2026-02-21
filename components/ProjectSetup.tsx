@@ -16,6 +16,7 @@ const ProjectSetup: React.FC<ProjectSetupProps> = ({ onComplete, embedded = fals
   });
   const [errors, setErrors] = useState<{[key: string]: string}>({});
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [submitError, setSubmitError] = useState<string | null>(null);
 
   const validate = () => {
     const newErrors: {[key: string]: string} = {};
@@ -30,6 +31,7 @@ const ProjectSetup: React.FC<ProjectSetupProps> = ({ onComplete, embedded = fals
     if (!validate()) return;
 
     setIsSubmitting(true);
+    setSubmitError(null);
     try {
       await createProject({ 
         name: formData.name, 
@@ -39,6 +41,7 @@ const ProjectSetup: React.FC<ProjectSetupProps> = ({ onComplete, embedded = fals
       onComplete();
     } catch (error) {
       console.error("Failed to create project", error);
+      setSubmitError(error instanceof Error ? error.message : 'Failed to create project. Please try again.');
       setIsSubmitting(false);
     }
   };
@@ -126,7 +129,13 @@ const ProjectSetup: React.FC<ProjectSetupProps> = ({ onComplete, embedded = fals
           </div>
         </div>
 
-        <div className="pt-6">
+        <div className="pt-6 space-y-3">
+          {submitError && (
+            <div className="p-3 rounded-xl bg-red-50 border border-red-200 text-red-700 text-sm flex items-start gap-2 animate-in slide-in-from-top-2">
+              <AlertCircle className="h-4 w-4 mt-0.5 flex-shrink-0" />
+              <span>{submitError}</span>
+            </div>
+          )}
           <Button 
               type="submit" 
               className="w-full h-14 text-lg font-semibold shadow-xl shadow-blue-600/20 hover:shadow-blue-600/30 transition-all transform hover:-translate-y-0.5"

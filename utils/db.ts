@@ -3,7 +3,7 @@ import { generateInitialProjectAnalysis, analyzeSource } from './services/ai';
 const DB_NAME = 'ClarityAI_DB';
 const STORE_NAME = 'onboarding_store';
 const PROJECT_STORE = 'project_store';
-const DB_VERSION = 3; // Incremented for schema change
+const DB_VERSION = 4; // Incremented for schema fix
 
 export interface OnboardingState {
   step: number;
@@ -182,23 +182,63 @@ export interface ProjectState {
   }[];
 }
 
+let dbInstance: IDBDatabase | null = null;
+
 export const initDB = (): Promise<IDBDatabase> => {
+  // Return cached instance if available and open
+  if (dbInstance && dbInstance.objectStoreNames.length > 0) {
+    return Promise.resolve(dbInstance);
+  }
+
   return new Promise((resolve, reject) => {
     const request = indexedDB.open(DB_NAME, DB_VERSION);
 
-    request.onerror = () => reject(request.error);
-    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => {
+      console.error('IndexedDB open error:', request.error);
+      // Try to delete and recreate the database if it's corrupted
+      indexedDB.deleteDatabase(DB_NAME).onsuccess = () => {
+        console.log('Deleted corrupted database, retrying...');
+        initDB().then(resolve).catch(reject);
+      };
+    };
+
+    request.onsuccess = () => {
+      const db = request.result;
+      // Verify all required object stores exist
+      if (!db.objectStoreNames.contains(STORE_NAME) || !db.objectStoreNames.contains(PROJECT_STORE)) {
+        console.warn('Missing object stores, recreating database...');
+        db.close();
+        indexedDB.deleteDatabase(DB_NAME).onsuccess = () => {
+          initDB().then(resolve).catch(reject);
+        };
+        return;
+      }
+      dbInstance = db;
+      resolve(db);
+    };
 
     request.onupgradeneeded = (event) => {
       const db = (event.target as IDBOpenDBRequest).result;
+      
+      // Create object stores if they don't exist
       if (!db.objectStoreNames.contains(STORE_NAME)) {
         db.createObjectStore(STORE_NAME, { keyPath: 'id' });
+        console.log('Created object store:', STORE_NAME);
       }
       if (!db.objectStoreNames.contains(PROJECT_STORE)) {
         db.createObjectStore(PROJECT_STORE, { keyPath: 'id' });
+        console.log('Created object store:', PROJECT_STORE);
       }
     };
   });
+};
+
+// Helper to clear database cache (useful after errors)
+export const resetDBConnection = (): void => {
+  if (dbInstance) {
+    dbInstance.close();
+    dbInstance = null;
+  }
 };
 
 export const saveOnboardingState = async (state: Partial<OnboardingState>) => {
@@ -295,7 +335,13 @@ export const createProject = async (data: { name: string; timeline: string; goal
              completeness: aiAnalysis.completeness,
              stakeholderCoverage: aiAnalysis.stakeholderCoverage,
              overallConfidence: aiAnalysis.overallConfidence,
-             tasks: aiAnalysis.tasks.map((t: any, i: number) => ({ ...t, id: `t_${Date.now()}_${i}`, source: 'Initial Analysis' })),
+             tasks: aiAnalysis.tasks.map((t: any, i: number) => ({ 
+                 ...t, 
+                 id: `t_${Date.now()}_${i}`, 
+                 source: 'Initial Analysis',
+                 status: 'pending' as const,
+                 createdAt: new Date().toISOString()
+             })),
              recentActivity: [
                 { id: `act_${Date.now()}_ai`, user: 'AI Agent', action: 'Initial analysis complete', time: new Date().toISOString() },
                 ...project.recentActivity

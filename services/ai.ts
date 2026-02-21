@@ -173,8 +173,8 @@ export const generateInitialProjectAnalysis = async (
       overallConfidence: 20,
       summary: "Project initialized. Awaiting data sources.",
       tasks: [
-        { title: "Connect first data source", type: "missing", urgency: "high", confidence: 100 },
-        { title: "Define stakeholder list", type: "missing", urgency: "medium", confidence: 100 }
+        { title: "Connect first data source", type: "missing", urgency: "high", confidence: 100, status: 'pending', createdAt: new Date().toISOString() },
+        { title: "Define stakeholder list", type: "missing", urgency: "medium", confidence: 100, status: 'pending', createdAt: new Date().toISOString() }
       ]
     };
   }
@@ -493,7 +493,7 @@ export const analyzeSource = async (
     console.error("AI Source Analysis Failed:", error);
     return {
       tasks: [
-        { title: `Review ${sourceName}`, type: 'ambiguity', urgency: 'medium', source: sourceName, confidence: 50 }
+        { title: `Review ${sourceName}`, type: 'ambiguity', urgency: 'medium', source: sourceName, confidence: 50, status: 'pending', createdAt: new Date().toISOString() }
       ],
       insights: [
         { 
@@ -537,50 +537,51 @@ export interface TrustScoreAnalysis {
 export const getQuickTrustScore = (project: ProjectState): TrustScoreAnalysis => {
   const trustResult = calculateProjectTrust(project);
   
-  // Map TrustScoreEngine factors to breakdown
-  const findFactor = (name: string) => 
-    trustResult.factors.find(f => f.name.toLowerCase().includes(name.toLowerCase()))?.score || 60;
+  // Map TrustScoreEngine dimensions to breakdown
+  const findDimension = (name: string) => 
+    trustResult.dimensions.find(d => d.name.toLowerCase().includes(name.toLowerCase()))?.score || 60;
   
-  const score = trustResult.finalScore;
+  const score = trustResult.overall;
   // More achievable grade thresholds
   const grade = score >= 85 ? 'A' : score >= 72 ? 'B' : score >= 58 ? 'C' : score >= 45 ? 'D' : 'F';
   
-  // Always find strengths first - look for factors >= 55 (reasonable threshold)
-  const strongFactors = trustResult.factors.filter(f => f.score >= 55)
+  // Always find strengths first - look for dimensions >= 55 (reasonable threshold)
+  const strongDimensions = trustResult.dimensions.filter(d => d.score >= 55)
     .sort((a, b) => b.score - a.score)
     .slice(0, 3)
-    .map(f => {
-      if (f.score >= 80) return `Excellent ${f.name.toLowerCase()}`;
-      if (f.score >= 70) return `Strong ${f.name.toLowerCase()}`;
-      return `Good ${f.name.toLowerCase()}`;
+    .map(d => {
+      if (d.score >= 80) return `Excellent ${d.name.toLowerCase()}`;
+      if (d.score >= 70) return `Strong ${d.name.toLowerCase()}`;
+      return `Good ${d.name.toLowerCase()}`;
     });
   
-  // Default strengths if factors are still building
-  const strengths = strongFactors.length > 0 ? strongFactors : [
+  // Default strengths if dimensions are still building
+  const strengths = strongDimensions.length > 0 ? strongDimensions : [
     project.sources.length > 0 ? 'Data sources connected' : 'Project initialized',
     project.insights.length > 0 ? 'Insights extracted' : 'Ready for analysis',
     'System configured and operational'
   ];
   
-  // Only show improvements for factors below 55
-  const weakFactors = trustResult.factors.filter(f => f.score < 55);
-  const improvements = weakFactors.length > 0 
-    ? trustResult.recommendations.slice(0, 2)
+  // Only show improvements for dimensions below 55
+  const weakDimensions = trustResult.dimensions.filter(d => d.score < 55);
+  const improvements = weakDimensions.length > 0 
+    ? trustResult.alerts.map(a => a.action).filter(Boolean).slice(0, 2) as string[]
     : [];
   
   // Positive-first summary
   const generateSummary = () => {
     const hasData = project.sources.length > 0 || project.insights.length > 0;
-    const highCount = trustResult.factors.filter(f => f.score >= 70).length;
+    const highCount = trustResult.dimensions.filter(d => d.score >= 70).length;
+    const dominantDim = trustResult.dimensions.reduce((a, b) => a.score > b.score ? a : b, trustResult.dimensions[0]);
     
     if (score >= 80) {
-      return `Excellent project health. ${trustResult.metadata.dominantFactor} leads at ${Math.round(trustResult.metadata.dominantScore)}%.`;
+      return `Excellent project health. ${dominantDim?.name || 'Quality'} leads at ${Math.round(dominantDim?.score || score)}%.`;
     }
     if (score >= 65) {
       return `Good project progress. ${highCount > 0 ? `${highCount} factor(s) performing well.` : 'On track for completion.'}`;
     }
     if (hasData) {
-      return `Project developing well. ${strongFactors.length > 0 ? `${strongFactors[0]} is a highlight.` : 'Continue adding data for best results.'}`;
+      return `Project developing well. ${strongDimensions.length > 0 ? `${strongDimensions[0]} is a highlight.` : 'Continue adding data for best results.'}`;
     }
     return 'Project ready to begin. Add sources to start analysis.';
   };
@@ -589,11 +590,11 @@ export const getQuickTrustScore = (project: ProjectState): TrustScoreAnalysis =>
     score,
     grade,
     breakdown: {
-      dataQuality: findFactor('Source'),
-      requirementClarity: findFactor('Linguistic'),
-      stakeholderAlignment: findFactor('Stakeholder'),
-      riskCoverage: findFactor('Task'),
-      completeness: findFactor('Coverage') || findFactor('BRD')
+      dataQuality: findDimension('Evidence'),
+      requirementClarity: findDimension('Consistency'),
+      stakeholderAlignment: findDimension('Validation'),
+      riskCoverage: findDimension('Freshness'),
+      completeness: findDimension('Completeness')
     },
     strengths,
     improvements,
