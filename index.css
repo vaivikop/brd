@@ -1,0 +1,77 @@
+@layer utilities {
+  .animate-pulse-slow {
+    animation: pulse 3s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+  }
+}
+
+/* Graph View Animations */
+@keyframes flowParticle {
+  0% {
+    offset-distance: 0%;
+    opacity: 0;
+  }
+  10% {
+    opacity: 1;
+  }
+  90% {
+    opacity: 1;
+  }
+  100% {
+    offset-distance: 100%;
+    opacity: 0;
+  }
+}
+
+@keyframes connectionPulse {
+  0%, 100% {
+    stroke-opacity: 0.6;
+  }
+  50% {
+    stroke-opacity: 0.9;
+  }
+}
+
+.graph-connection-animated {
+  animation: connectionPulse 3s ease-in-out infinite;
+}
+
+.graph-particle {
+  animation: flowParticle 2.5s linear infinite;
+}
+
+@media print {
+  body {
+    background: white !important;
+    color: black !important;
+  }
+  .print\:hidden {
+    display: none !important;
+  }
+  .print\:block {
+    display: block !important;
+  }
+  .print\:max-w-none {
+    max-width: none !important;
+  }
+  .print\:p-0 {
+    padding: 0 !important;
+  }
+  .print\:shadow-none {
+    box-shadow: none !important;
+  }
+  .print\:border-none {
+    border: none !important;
+  }
+  .print\:prose-p\:text-black p {
+    color: black !important;
+  }
+  .print\:prose-headings\:text-black h1,
+  .print\:prose-headings\:text-black h2,
+  .print\:prose-headings\:text-black h3,
+  .print\:prose-headings\:text-black h4 {
+    color: black !important;
+  }
+  .break-inside-avoid {
+    break-inside: avoid;
+  }
+}

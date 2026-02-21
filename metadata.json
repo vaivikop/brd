@@ -1,0 +1,5 @@
+{
+  "name": "ClarityAI - BRD Agent",
+  "description": "An AI-powered Business Requirements Document generation agent that transforms raw conversations into actionable, living documentation.",
+  "requestFramePermissions": []
+}
