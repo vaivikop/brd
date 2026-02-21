@@ -61,9 +61,6 @@ import {
 import { useToast } from '../context/ToastContext';
 import { calculateAllMetrics } from '../utils/metrics';
 import { 
-  calculateTrustScore, 
-  TrustScoreAnalysis, 
-  getQuickTrustScore,
   searchProject,
   SearchResult 
 } from '../services/ai';
@@ -94,11 +91,6 @@ const DashboardHome: React.FC<DashboardHomeProps> = ({ project, onNavigateToSour
   const [showEditGoals, setShowEditGoals] = useState(false);
   const [editedGoals, setEditedGoals] = useState(project.goals || '');
   const [isSavingGoals, setIsSavingGoals] = useState(false);
-  
-  // Trust Score from AI
-  const [trustScore, setTrustScore] = useState<TrustScoreAnalysis | null>(null);
-  const [isLoadingTrustScore, setIsLoadingTrustScore] = useState(false);
-  const [trustScoreError, setTrustScoreError] = useState<string | null>(null);
   
   // ============================================================================
   // CLARITY AI CHATBOT - Enterprise Grade
@@ -255,59 +247,6 @@ const DashboardHome: React.FC<DashboardHomeProps> = ({ project, onNavigateToSour
     return <>{elements}</>;
   }, []);
 
-  // Fetch Trust Score - use quick score immediately, then fetch AI score async
-  useEffect(() => {
-    // Immediate calculation using TrustScoreEngine (no API call)
-    try {
-      const quickScore = getQuickTrustScore(project);
-      setTrustScore(quickScore);
-    } catch (err) {
-      console.error('Quick trust score error:', err);
-    }
-
-    // Then fetch detailed AI score in background (optional)
-    const fetchDetailedTrustScore = async () => {
-      setIsLoadingTrustScore(true);
-      setTrustScoreError(null);
-      try {
-        const score = await calculateTrustScore({
-          name: project.name,
-          goals: project.goals,
-          sources: project.sources.map(s => ({ name: s.name, type: s.type })),
-          insights: project.insights.map(i => ({ 
-            category: i.category, 
-            summary: i.summary, 
-            confidence: i.confidence,
-            status: i.status 
-          })),
-          tasks: project.tasks.map(t => ({ 
-            title: t.title, 
-            type: t.type, 
-            urgency: t.urgency 
-          })),
-          brd: project.brd ? {
-            sections: project.brd.sections.map(s => ({
-              title: s.title,
-              content: s.content,
-              confidence: s.confidence
-            }))
-          } : undefined
-        });
-        setTrustScore(score);
-      } catch (err) {
-        console.error('Trust score error:', err);
-        // Keep using quick score on error - don't show error to user
-      } finally {
-        setIsLoadingTrustScore(false);
-      }
-    };
-
-    // Only fetch detailed score if we have significant data
-    if (project.sources.length > 0 && project.insights.length > 3) {
-      fetchDetailedTrustScore();
-    }
-  }, [project.sources.length, project.insights.length, project.tasks.length, project.brd?.sections?.length, project.lastUpdated]);
-
   // Search functionality
   useEffect(() => {
     if (!searchQuery.trim()) {
@@ -402,56 +341,6 @@ const DashboardHome: React.FC<DashboardHomeProps> = ({ project, onNavigateToSour
       case 'source':
         onNavigateToSources();
         break;
-    }
-  };
-
-  // Refresh trust score
-  const handleRefreshTrustScore = async () => {
-    // Immediate update with quick score
-    try {
-      const quickScore = getQuickTrustScore(project);
-      setTrustScore(quickScore);
-    } catch (err) {
-      console.error('Quick score error:', err);
-    }
-
-    setIsLoadingTrustScore(true);
-    setTrustScoreError(null);
-    try {
-      const score = await calculateTrustScore({
-        name: project.name,
-        goals: project.goals,
-        sources: project.sources.map(s => ({ name: s.name, type: s.type })),
-        insights: project.insights.map(i => ({ 
-          category: i.category, 
-          summary: i.summary, 
-          confidence: i.confidence,
-          status: i.status 
-        })),
-        tasks: project.tasks.map(t => ({ 
-          title: t.title, 
-          type: t.type, 
-          urgency: t.urgency 
-        })),
-        brd: project.brd ? {
-          sections: project.brd.sections.map(s => ({
-            title: s.title,
-            content: s.content,
-            confidence: s.confidence
-          }))
-        } : undefined
-      });
-      setTrustScore(score);
-      showToast({
-        type: 'success',
-        title: 'Trust Score Updated',
-        message: `New score: ${score.score}% (${score.grade})`,
-        duration: 3000,
-      });
-    } catch (err) {
-      setTrustScoreError('Failed to refresh');
-    } finally {
-      setIsLoadingTrustScore(false);
     }
   };
 
@@ -1706,144 +1595,8 @@ const DashboardHome: React.FC<DashboardHomeProps> = ({ project, onNavigateToSour
             </div>
         </div>
 
-        {/* Right Content: Confidence */}
+        {/* Right Content: AI Assistant */}
         <div className="space-y-8">
-            <div>
-                <div className="flex items-center justify-between mb-4 lg:mb-6">
-                    <h2 className="text-xl lg:text-2xl font-bold text-slate-900 flex items-center gap-2 lg:gap-3">
-                        <ShieldCheck className="h-5 lg:h-6 w-5 lg:w-6 text-emerald-600" /> Trust Score
-                    </h2>
-                    <div className="flex items-center gap-2">
-                      <button 
-                        onClick={handleRefreshTrustScore}
-                        disabled={isLoadingTrustScore}
-                        className="p-1.5 rounded-lg hover:bg-slate-100 transition-colors disabled:opacity-50"
-                      >
-                        <RefreshCw className={`h-4 w-4 text-slate-400 ${isLoadingTrustScore ? 'animate-spin' : ''}`} />
-                      </button>
-                      <Tooltip content="Trust score calculated by Gemini AI based on your project data, sources, and insights quality.">
-                         <span className="text-xs font-bold text-blue-600 cursor-help border-b border-dashed border-blue-300 uppercase tracking-widest">AI Powered</span>
-                      </Tooltip>
-                    </div>
-                </div>
-
-                <div className="bg-white p-6 lg:p-8 rounded-2xl lg:rounded-[2rem] shadow-sm border border-slate-100 text-center relative overflow-hidden group">
-                    <div className={`absolute top-0 left-0 w-full h-1 ${
-                      (trustScore?.score ?? metrics.overallConfidence) >= 70 ? 'bg-emerald-500' :
-                      (trustScore?.score ?? metrics.overallConfidence) >= 40 ? 'bg-amber-500' :
-                      'bg-red-500'
-                    }`}></div>
-                    <div className="relative z-10">
-                        {isLoadingTrustScore ? (
-                          <div className="py-8 flex flex-col items-center gap-4">
-                            <Loader2 className="h-12 w-12 text-blue-500 animate-spin" />
-                            <span className="text-sm text-slate-500 font-medium">Analyzing with Gemini...</span>
-                          </div>
-                        ) : trustScoreError ? (
-                          <div className="py-8 flex flex-col items-center gap-4">
-                            <AlertTriangle className="h-12 w-12 text-amber-500" />
-                            <span className="text-sm text-slate-500">{trustScoreError}</span>
-                            <Button size="sm" variant="outline" onClick={handleRefreshTrustScore}>
-                              Try Again
-                            </Button>
-                          </div>
-                        ) : (
-                          <>
-                            <div className="flex items-center justify-center gap-4 mb-2">
-                              <div className="text-6xl font-black text-slate-900 tracking-tighter group-hover:scale-110 transition-transform duration-500">
-                                {trustScore?.score ?? metrics.overallConfidence}%
-                              </div>
-                              {trustScore?.grade && (
-                                <div className={`text-3xl font-black px-4 py-2 rounded-xl ${
-                                  trustScore.grade === 'A' ? 'bg-emerald-100 text-emerald-700' :
-                                  trustScore.grade === 'B' ? 'bg-blue-100 text-blue-700' :
-                                  trustScore.grade === 'C' ? 'bg-amber-100 text-amber-700' :
-                                  trustScore.grade === 'D' ? 'bg-orange-100 text-orange-700' :
-                                  'bg-red-100 text-red-700'
-                                }`}>
-                                  {trustScore.grade}
-                                </div>
-                              )}
-                            </div>
-                            <div className="text-sm font-bold text-slate-500 uppercase tracking-widest mb-6">
-                              {trustScore?.summary || 'Requirement Confidence'}
-                            </div>
-
-                            {trustScore?.breakdown && (
-                              <div className="space-y-4 text-left mb-6">
-                                {Object.entries(trustScore.breakdown).map(([key, value]) => (
-                                  <div key={key}>
-                                    <div className="flex justify-between text-xs font-bold mb-1.5">
-                                      <span className="text-slate-600 capitalize">{key.replace(/([A-Z])/g, ' $1').trim()}</span>
-                                      <span className="text-slate-900">{value}%</span>
-                                    </div>
-                                    <div className="h-2 bg-slate-100 rounded-full overflow-hidden">
-                                      <div 
-                                        className={`h-full rounded-full transition-all duration-1000 ${
-                                          value >= 70 ? 'bg-emerald-500' :
-                                          value >= 40 ? 'bg-amber-500' :
-                                          'bg-red-500'
-                                        }`} 
-                                        style={{ width: `${value}%` }}
-                                      ></div>
-                                    </div>
-                                  </div>
-                                ))}
-                              </div>
-                            )}
-
-                            {trustScore?.strengths && trustScore.strengths.length > 0 && (
-                              <div className="text-left mb-4">
-                                <h4 className="text-[10px] font-black text-emerald-600 uppercase tracking-widest mb-2">Strengths</h4>
-                                <ul className="space-y-1">
-                                  {trustScore.strengths.slice(0, 2).map((s, i) => (
-                                    <li key={i} className="text-xs text-slate-600 flex items-start gap-2">
-                                      <CheckCircle className="h-3.5 w-3.5 text-emerald-500 flex-shrink-0 mt-0.5" />
-                                      <span>{s}</span>
-                                    </li>
-                                  ))}
-                                </ul>
-                              </div>
-                            )}
-
-                            {trustScore?.improvements && trustScore.improvements.length > 0 && (
-                              <div className="text-left">
-                                <h4 className="text-[10px] font-black text-amber-600 uppercase tracking-widest mb-2">Improvements</h4>
-                                <ul className="space-y-1">
-                                  {trustScore.improvements.slice(0, 2).map((s, i) => (
-                                    <li key={i} className="text-xs text-slate-600 flex items-start gap-2">
-                                      <Target className="h-3.5 w-3.5 text-amber-500 flex-shrink-0 mt-0.5" />
-                                      <span>{s}</span>
-                                    </li>
-                                  ))}
-                                </ul>
-                              </div>
-                            )}
-                          </>
-                        )}
-                        
-                        {!isLoadingTrustScore && !trustScoreError && (
-                          <div className="mt-8 pt-6 border-t border-slate-50">
-                            <h4 className="text-[10px] font-black text-slate-400 uppercase tracking-[0.2em] mb-4">Recent Intelligence</h4>
-                            <ul className="space-y-4">
-                                {project.recentActivity.slice(0, 3).map((activity) => (
-                                    <li key={activity.id} className="flex gap-3 items-start text-sm">
-                                        <div className="mt-1.5 w-2 h-2 rounded-full bg-blue-500 flex-shrink-0 shadow-sm shadow-blue-200"></div>
-                                        <div className="text-left">
-                                            <div className="font-bold text-slate-900 leading-tight">
-                                                <span className="text-blue-600">{activity.user}</span> {activity.action}
-                                            </div>
-                                            <div className="text-[10px] font-bold text-slate-400 mt-1 uppercase tracking-wider">{activity.time}</div>
-                                        </div>
-                                    </li>
-                                ))}
-                            </ul>
-                          </div>
-                        )}
-                    </div>
-                </div>
-            </div>
-
             {/* AI Assistant Quick Card */}
             <div className="bg-slate-900 rounded-[2rem] text-white shadow-xl shadow-slate-900/20 relative overflow-hidden group p-6">
                 <div className="absolute top-[-20%] right-[-10%] w-32 h-32 bg-blue-600 rounded-full blur-3xl opacity-20 group-hover:opacity-40 transition-opacity"></div>
@@ -1864,6 +1617,24 @@ const DashboardHome: React.FC<DashboardHomeProps> = ({ project, onNavigateToSour
                       <span>Powered by Gemini • Full context</span>
                     </div>
                 </div>
+            </div>
+
+            {/* Recent Activity Card */}
+            <div className="bg-white p-6 lg:p-8 rounded-2xl lg:rounded-[2rem] shadow-sm border border-slate-100">
+              <h4 className="text-[10px] font-black text-slate-400 uppercase tracking-[0.2em] mb-4">Recent Intelligence</h4>
+              <ul className="space-y-4">
+                  {project.recentActivity.slice(0, 5).map((activity) => (
+                      <li key={activity.id} className="flex gap-3 items-start text-sm">
+                          <div className="mt-1.5 w-2 h-2 rounded-full bg-blue-500 flex-shrink-0 shadow-sm shadow-blue-200"></div>
+                          <div className="text-left">
+                              <div className="font-bold text-slate-900 leading-tight">
+                                  <span className="text-blue-600">{activity.user}</span> {activity.action}
+                              </div>
+                              <div className="text-[10px] font-bold text-slate-400 mt-1 uppercase tracking-wider">{activity.time}</div>
+                          </div>
+                      </li>
+                  ))}
+              </ul>
             </div>
         </div>
 

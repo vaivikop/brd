@@ -10,7 +10,6 @@ import {
   ChevronLeft,
   ChevronRight,
   ShieldAlert,
-  Table2,
   Heart,
   ClipboardList,
   X
@@ -158,7 +157,6 @@ const Sidebar: React.FC<SidebarProps> = ({ activeTab, setActiveTab, collapsed = 
 
   const analysisMenuItems = [
     { id: 'conflicts', label: 'Conflict Detection', icon: ShieldAlert },
-    { id: 'traceability', label: 'Traceability Matrix', icon: Table2 },
     { id: 'sentiment', label: 'Stakeholder Sentiment', icon: Heart },
     { id: 'status-report', label: 'Status Reports', icon: ClipboardList },
     { id: 'graph', label: 'Graph View', icon: Network },

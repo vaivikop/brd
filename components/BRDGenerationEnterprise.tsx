@@ -61,6 +61,7 @@ import { ProjectState, BRDSection, updateBRD, updateProjectStatus, getProjectSta
 import { generateBRDAdvanced, refineBRDSection, analyzeGaps, BRDTemplate, BRDAudience, BRDTone } from '../utils/services/ai';
 import { quickExportBRD, exportToWord, exportToHTML, exportToConfluence } from '../utils/pdfExport';
 import { SourceBadge, inferSourceType } from '../utils/sourceIcons';
+import { computeLineDiff, computeWordDiff, WordDiff } from '../utils/diffUtils';
 
 // ============================================================================
 // TYPES & INTERFACES
@@ -140,6 +141,118 @@ const QUICK_ACTIONS = [
   { id: 'technical', label: 'Make Technical', prompt: 'Add more technical depth and specifications' },
   { id: 'executive', label: 'Executive Summary', prompt: 'Rewrite for executive audience, focus on business value' },
 ];
+
+// ============================================================================
+// DIFF VIEW COMPONENT - Side-by-side with word-level highlighting
+// ============================================================================
+
+interface DiffViewProps {
+  oldContent: string;
+  newContent: string;
+  oldVersion: number;
+  newVersion: number;
+}
+
+const DiffView: React.FC<DiffViewProps> = ({ oldContent, newContent, oldVersion, newVersion }) => {
+  // Compute word-level diff for inline highlighting
+  const wordDiff = useMemo(() => computeWordDiff(oldContent, newContent), [oldContent, newContent]);
+  
+  const addedCount = wordDiff.filter(w => w.type === 'added').length;
+  const removedCount = wordDiff.filter(w => w.type === 'removed').length;
+  const hasChanges = addedCount > 0 || removedCount > 0;
+
+  // Build content for old version (show removed in red, hide added)
+  const oldVersionContent = wordDiff
+    .filter(w => w.type !== 'added')
+    .map((word, idx) => {
+      if (word.type === 'removed') {
+        return (
+          <span key={idx} className="bg-red-200 text-red-900 px-0.5 rounded">
+            {word.text}
+          </span>
+        );
+      }
+      return <span key={idx}>{word.text}</span>;
+    });
+
+  // Build content for new version (show added in green, hide removed)
+  const newVersionContent = wordDiff
+    .filter(w => w.type !== 'removed')
+    .map((word, idx) => {
+      if (word.type === 'added') {
+        return (
+          <span key={idx} className="bg-emerald-200 text-emerald-900 px-0.5 rounded">
+            {word.text}
+          </span>
+        );
+      }
+      return <span key={idx}>{word.text}</span>;
+    });
+
+  return (
+    <div className="space-y-3">
+      {/* Header with change summary */}
+      {hasChanges && (
+        <div className="flex items-center justify-between px-4 py-2.5 bg-slate-50 rounded-xl border border-slate-200">
+          <div className="flex items-center gap-4 text-xs">
+            <span className="text-slate-600 font-medium">Changes:</span>
+            {addedCount > 0 && (
+              <span className="flex items-center gap-1.5 px-2 py-1 bg-emerald-100 text-emerald-700 rounded-md font-medium">
+                <Plus className="h-3 w-3" />
+                {addedCount} added
+              </span>
+            )}
+            {removedCount > 0 && (
+              <span className="flex items-center gap-1.5 px-2 py-1 bg-red-100 text-red-700 rounded-md font-medium">
+                <Trash2 className="h-3 w-3" />
+                {removedCount} removed
+              </span>
+            )}
+          </div>
+        </div>
+      )}
+      
+      {/* Side-by-side comparison */}
+      <div className="grid grid-cols-2 gap-4">
+        {/* Previous Version */}
+        <div className="rounded-xl border border-red-200 overflow-hidden">
+          <div className="flex items-center gap-2 px-4 py-2.5 bg-red-50 border-b border-red-200">
+            <History className="h-4 w-4 text-red-600" />
+            <span className="text-xs font-bold uppercase text-red-700">Version {oldVersion}</span>
+          </div>
+          <div className="p-4 bg-white text-sm leading-relaxed whitespace-pre-wrap">
+            {oldVersionContent}
+          </div>
+        </div>
+        
+        {/* Current Version */}
+        <div className="rounded-xl border border-emerald-200 overflow-hidden">
+          <div className="flex items-center gap-2 px-4 py-2.5 bg-emerald-50 border-b border-emerald-200">
+            <CheckCircle2 className="h-4 w-4 text-emerald-600" />
+            <span className="text-xs font-bold uppercase text-emerald-700">Version {newVersion}</span>
+          </div>
+          <div className="p-4 bg-white text-sm leading-relaxed whitespace-pre-wrap">
+            {newVersionContent}
+          </div>
+        </div>
+      </div>
+      
+      {/* Legend */}
+      {hasChanges && (
+        <div className="flex items-center justify-end gap-4 text-xs text-slate-500">
+          <span className="flex items-center gap-1.5">
+            <span className="px-1.5 py-0.5 bg-red-200 text-red-900 rounded text-xs">removed</span>
+            Removed text
+          </span>
+          <span className="flex items-center gap-1.5">
+            <span className="px-1.5 py-0.5 bg-emerald-200 text-emerald-900 rounded text-xs">added</span>
+            Added text
+          </span>
+        </div>
+      )}
+    </div>
+  );
+};
 
 // ============================================================================
 // MAIN COMPONENT
@@ -1624,30 +1737,12 @@ const BRDGenerationEnterprise: React.FC<BRDGenerationEnterpriseProps> = ({
                                   </div>
                                 </div>
                               ) : viewMode === 'compare' && compareVersion && project.brdHistory ? (
-                                <div className="grid grid-cols-2 gap-4">
-                                  {/* Previous Version */}
-                                  <div className="p-4 bg-red-50 rounded-xl border border-red-200">
-                                    <div className="flex items-center gap-2 mb-3 text-red-700">
-                                      <History className="h-4 w-4" />
-                                      <span className="text-xs font-bold uppercase">Version {compareVersion}</span>
-                                    </div>
-                                    <div className="prose prose-sm prose-slate max-w-none">
-                                      <Markdown remarkPlugins={[remarkGfm]}>
-                                        {project.brdHistory?.find(v => v.version === compareVersion)?.sections[index]?.content || '*Section not found in this version*'}
-                                      </Markdown>
-                                    </div>
-                                  </div>
-                                  {/* Current Version */}
-                                  <div className="p-4 bg-emerald-50 rounded-xl border border-emerald-200">
-                                    <div className="flex items-center gap-2 mb-3 text-emerald-700">
-                                      <CheckCircle2 className="h-4 w-4" />
-                                      <span className="text-xs font-bold uppercase">Current (v{brd?.version})</span>
-                                    </div>
-                                    <div className="prose prose-sm prose-slate max-w-none">
-                                      <Markdown remarkPlugins={[remarkGfm]}>{section.content}</Markdown>
-                                    </div>
-                                  </div>
-                                </div>
+                                <DiffView
+                                  oldContent={project.brdHistory?.find(v => v.version === compareVersion)?.sections[index]?.content || '*Section not found in this version*'}
+                                  newContent={section.content}
+                                  oldVersion={compareVersion}
+                                  newVersion={brd?.version || 0}
+                                />
                               ) : (
                                 <div className="prose prose-slate max-w-none prose-headings:text-slate-900 prose-headings:font-bold prose-p:text-slate-600 prose-p:leading-relaxed prose-strong:text-slate-900 prose-ul:text-slate-600 prose-li:marker:text-slate-400 prose-table:w-full prose-th:bg-slate-100 prose-th:border prose-th:border-slate-200 prose-th:px-4 prose-th:py-2 prose-th:text-left prose-th:font-semibold prose-th:text-slate-700 prose-td:border prose-td:border-slate-200 prose-td:px-4 prose-td:py-2 prose-td:text-slate-600">
                                   <Markdown remarkPlugins={[remarkGfm]}>{section.content}</Markdown>

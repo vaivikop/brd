@@ -404,7 +404,11 @@ export const updateBRD = async (brd: ProjectState['brd'], markInsightsAsUsed: bo
 
     const history = project.brdHistory || [];
     if (project.brd) {
-        history.push(project.brd);
+        // Only add to history if this version is not already there (prevent duplicates)
+        const alreadyInHistory = history.some(h => h.version === project.brd!.version);
+        if (!alreadyInHistory) {
+            history.push(project.brd);
+        }
     }
 
     // Extract all source names from BRD sections
@@ -659,7 +663,7 @@ export const mergeInsights = async (primaryId: string, duplicateIds: string[]): 
                 stakeholderMentions: Array.from(allStakeholders),
                 // Boost confidence based on evidence
                 confidenceScore: Math.min(100, (insight.confidenceScore || 50) + duplicates.length * 15),
-                confidence: allSources.length >= 3 ? 'high' : allSources.length >= 1 ? 'medium' : 'low'
+                confidence: (allSources.length >= 3 ? 'high' : allSources.length >= 1 ? 'medium' : 'low') as 'high' | 'medium' | 'low'
             };
         }
         if (duplicateIds.includes(insight.id)) {

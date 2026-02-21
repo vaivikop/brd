@@ -9,7 +9,6 @@ import BRDGenerationEnterprise from './BRDGenerationEnterprise';
 import BRDEdit from './BRDEdit';
 import GraphView from './GraphView';
 import ConflictDetection from './ConflictDetection';
-import TraceabilityMatrix from './TraceabilityMatrix';
 import SentimentDashboard from './SentimentDashboard';
 import StatusReportView from './StatusReportView';
 import AgentPanel from './AgentPanel';
@@ -244,16 +243,6 @@ const DashboardLayout: React.FC = () => {
                 <ConflictDetection 
                   project={project} 
                   onUpdate={setProject}
-                  onNavigateToInsights={() => setActiveTab('insights')}
-                  onNavigateToBRD={() => setActiveTab('generate')}
-                />
-              </ErrorBoundary>
-          )}
-
-          {activeTab === 'traceability' && (
-              <ErrorBoundary>
-                <TraceabilityMatrix 
-                  project={project}
                   onNavigateToInsights={() => setActiveTab('insights')}
                   onNavigateToBRD={() => setActiveTab('generate')}
                 />

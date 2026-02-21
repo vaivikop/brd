@@ -126,14 +126,150 @@ const repairJson = (text: string): string => {
   // Remove any markdown code block markers
   json = json.replace(/^```json\s*/i, '').replace(/^```\s*/i, '').replace(/\s*```$/i, '');
   
-  // Strategy 1: Try to find last complete object in array and truncate there
-  // This handles cases where the JSON got cut off mid-object
+  // Strategy 1: Deep repair - handles both objects and arrays with nested truncation
+  const deepRepaired = deepRepairJson(json);
+  if (deepRepaired) {
+    try {
+      JSON.parse(deepRepaired);
+      return deepRepaired;
+    } catch {
+      // Continue to other strategies
+    }
+  }
+  
+  // Strategy 2: Try to find last complete object in array and truncate there
   const lastCompleteObjectMatch = findLastCompleteObject(json);
   if (lastCompleteObjectMatch) {
-    json = lastCompleteObjectMatch;
-  } else {
-    // Strategy 2: Simple bracket/brace closing
-    json = simpleRepair(json);
+    try {
+      JSON.parse(lastCompleteObjectMatch);
+      return lastCompleteObjectMatch;
+    } catch {
+      // Continue to simple repair
+    }
+  }
+  
+  // Strategy 3: Simple bracket/brace closing
+  return simpleRepair(json);
+};
+
+// Deep repair handles truncated strings, incomplete objects in nested arrays
+const deepRepairJson = (json: string): string | null => {
+  try {
+    // Find where parsing fails
+    let lastValidPos = 0;
+    let repaired = json;
+    
+    // Iteratively try to fix the JSON
+    for (let attempts = 0; attempts < 10; attempts++) {
+      try {
+        JSON.parse(repaired);
+        return repaired;
+      } catch (e: any) {
+        const match = e.message.match(/position (\d+)/);
+        if (!match) break;
+        
+        const errorPos = parseInt(match[1]);
+        if (errorPos <= lastValidPos) break;
+        lastValidPos = errorPos;
+        
+        // Analyze what's at the error position
+        const beforeError = repaired.slice(0, errorPos);
+        const atError = repaired.slice(errorPos, errorPos + 20);
+        
+        // Case 1: Truncated inside a string - find the last unclosed quote
+        const lastQuote = beforeError.lastIndexOf('"');
+        if (lastQuote > 0) {
+          // Check if we're inside a string (odd number of unescaped quotes)
+          let quoteCount = 0;
+          let escaped = false;
+          for (let i = 0; i < errorPos; i++) {
+            if (escaped) { escaped = false; continue; }
+            if (repaired[i] === '\\') { escaped = true; continue; }
+            if (repaired[i] === '"') quoteCount++;
+          }
+          
+          if (quoteCount % 2 === 1) {
+            // Inside a string - close it and try to fix structure
+            repaired = beforeError + '"' + repaired.slice(errorPos);
+            continue;
+          }
+        }
+        
+        // Case 2: Incomplete object/array element - remove it
+        // Find the start of the current incomplete element
+        let bracketDepth = 0;
+        let braceDepth = 0;
+        let inStr = false;
+        let esc = false;
+        let elementStart = -1;
+        
+        for (let i = 0; i < errorPos; i++) {
+          const c = repaired[i];
+          if (esc) { esc = false; continue; }
+          if (c === '\\') { esc = true; continue; }
+          if (c === '"') { inStr = !inStr; continue; }
+          if (inStr) continue;
+          
+          if (c === '[') bracketDepth++;
+          if (c === ']') bracketDepth--;
+          if (c === '{') { braceDepth++; if (braceDepth === 1 && bracketDepth > 0) elementStart = i; }
+          if (c === '}') braceDepth--;
+          if (c === ',' && braceDepth === 0 && bracketDepth > 0) elementStart = i + 1;
+        }
+        
+        // If we found an incomplete element, remove it
+        if (elementStart > 0 && elementStart < errorPos) {
+          // Find what comes before this element
+          let cutPoint = elementStart;
+          // Look for preceding comma
+          for (let i = elementStart - 1; i >= 0; i--) {
+            if (repaired[i] === ',') { cutPoint = i; break; }
+            if (repaired[i] !== ' ' && repaired[i] !== '\n' && repaired[i] !== '\t') break;
+          }
+          repaired = repaired.slice(0, cutPoint);
+        } else {
+          // Just truncate at error position
+          repaired = repaired.slice(0, errorPos);
+        }
+        
+        // Clean up and close brackets
+        repaired = repaired.replace(/,\s*$/, '');
+        repaired = closeJson(repaired);
+      }
+    }
+    
+    return repaired;
+  } catch {
+    return null;
+  }
+};
+
+// Count and close unclosed brackets/braces
+const closeJson = (json: string): string => {
+  let openBraces = 0;
+  let openBrackets = 0;
+  let inString = false;
+  let escapeNext = false;
+  
+  for (let i = 0; i < json.length; i++) {
+    const char = json[i];
+    if (escapeNext) { escapeNext = false; continue; }
+    if (char === '\\') { escapeNext = true; continue; }
+    if (char === '"') { inString = !inString; continue; }
+    if (inString) continue;
+    
+    if (char === '{') openBraces++;
+    if (char === '}') openBraces--;
+    if (char === '[') openBrackets++;
+    if (char === ']') openBrackets--;
+  }
+  
+  // Close in reverse order of nesting
+  while (openBrackets > 0 || openBraces > 0) {
+    // Determine what to close based on what was opened last
+    // Simplified: close brackets first since arrays are usually inside objects
+    if (openBrackets > 0) { json += ']'; openBrackets--; }
+    else if (openBraces > 0) { json += '}'; openBraces--; }
   }
   
   return json;
@@ -243,6 +379,12 @@ const simpleRepair = (json: string): string => {
   json = json.replace(/,\s*"[^"]*":\s*$/g, '');
   json = json.replace(/,\s*$/g, '');
   
+  // Remove incomplete objects from arrays (e.g., trailing {"key": "value", without closing)
+  // Match incomplete object at end of array: ,{...without closing brace
+  json = json.replace(/,\s*\{[^{}]*$/g, '');
+  // Remove trailing commas before ] or }
+  json = json.replace(/,\s*([\]\}])/g, '$1');
+  
   // Recount after fixes
   openBraces = 0;
   openBrackets = 0;
@@ -271,14 +413,16 @@ const simpleRepair = (json: string): string => {
 const safeJsonParse = <T>(text: string, fallback: T): T => {
   try {
     return JSON.parse(text);
-  } catch (e) {
-    console.warn('[AI] JSON parse failed, attempting repair...');
+  } catch (e: any) {
+    console.warn('[AI] JSON parse failed, attempting repair...', e.message?.slice(0, 100));
     try {
       const repaired = repairJson(text);
-      console.log('[AI] Repaired JSON:', repaired.slice(0, 200) + '...');
-      return JSON.parse(repaired);
-    } catch (e2) {
-      console.error('[AI] JSON repair failed:', e2);
+      console.log('[AI] Repaired JSON length:', repaired.length, 'chars');
+      const parsed = JSON.parse(repaired);
+      console.log('[AI] JSON repair succeeded');
+      return parsed;
+    } catch (e2: any) {
+      console.error('[AI] JSON repair failed:', e2.message?.slice(0, 100));
       // Last resort: try to extract any complete objects from array
       try {
         const extracted = extractCompleteObjects(text);
@@ -289,8 +433,113 @@ const safeJsonParse = <T>(text: string, fallback: T): T => {
       } catch (e3) {
         // ignore
       }
+      // For object-type fallbacks, try to salvage partial data
+      if (typeof fallback === 'object' && fallback !== null && !Array.isArray(fallback)) {
+        const partial = extractPartialObject(text, fallback as Record<string, any>);
+        if (partial && Object.keys(partial).length > Object.keys(fallback as Record<string, any>).length / 2) {
+          console.log('[AI] Extracted partial object with', Object.keys(partial).length, 'keys');
+          return { ...fallback, ...partial } as T;
+        }
+      }
       return fallback;
     }
+  }
+};
+
+// Extract whatever valid data we can from a truncated object
+const extractPartialObject = (text: string, template: Record<string, any>): Record<string, any> | null => {
+  try {
+    let json = text.trim();
+    json = json.replace(/^```json\s*/i, '').replace(/^```\s*/i, '').replace(/\s*```$/i, '');
+    
+    const result: Record<string, any> = {};
+    
+    // Try to extract each expected key
+    for (const key of Object.keys(template)) {
+      // Match "key": value pattern
+      const keyPattern = new RegExp(`"${key}"\\s*:\\s*`, 'g');
+      const match = keyPattern.exec(json);
+      if (!match) continue;
+      
+      const valueStart = match.index + match[0].length;
+      const valueChar = json[valueStart];
+      
+      if (valueChar === '"') {
+        // String value - find closing quote
+        let end = valueStart + 1;
+        let escaped = false;
+        while (end < json.length) {
+          if (escaped) { escaped = false; end++; continue; }
+          if (json[end] === '\\') { escaped = true; end++; continue; }
+          if (json[end] === '"') { end++; break; }
+          end++;
+        }
+        try {
+          result[key] = JSON.parse(json.slice(valueStart, end));
+        } catch { /* skip this key */ }
+      } else if (valueChar === '[') {
+        // Array value - find matching bracket
+        let depth = 1;
+        let end = valueStart + 1;
+        let inStr = false;
+        let esc = false;
+        while (end < json.length && depth > 0) {
+          const c = json[end];
+          if (esc) { esc = false; end++; continue; }
+          if (c === '\\') { esc = true; end++; continue; }
+          if (c === '"') { inStr = !inStr; end++; continue; }
+          if (!inStr) {
+            if (c === '[') depth++;
+            if (c === ']') depth--;
+          }
+          end++;
+        }
+        if (depth === 0) {
+          try {
+            result[key] = JSON.parse(json.slice(valueStart, end));
+          } catch { /* skip this key */ }
+        }
+      } else if (valueChar === '{') {
+        // Object value - find matching brace
+        let depth = 1;
+        let end = valueStart + 1;
+        let inStr = false;
+        let esc = false;
+        while (end < json.length && depth > 0) {
+          const c = json[end];
+          if (esc) { esc = false; end++; continue; }
+          if (c === '\\') { esc = true; end++; continue; }
+          if (c === '"') { inStr = !inStr; end++; continue; }
+          if (!inStr) {
+            if (c === '{') depth++;
+            if (c === '}') depth--;
+          }
+          end++;
+        }
+        if (depth === 0) {
+          try {
+            result[key] = JSON.parse(json.slice(valueStart, end));
+          } catch { /* skip this key */ }
+        }
+      } else if (valueChar === '-' || (valueChar >= '0' && valueChar <= '9')) {
+        // Number value
+        let end = valueStart;
+        while (end < json.length && /[\d.\-eE+]/.test(json[end])) end++;
+        try {
+          result[key] = JSON.parse(json.slice(valueStart, end));
+        } catch { /* skip this key */ }
+      } else if (json.slice(valueStart, valueStart + 4) === 'true') {
+        result[key] = true;
+      } else if (json.slice(valueStart, valueStart + 5) === 'false') {
+        result[key] = false;
+      } else if (json.slice(valueStart, valueStart + 4) === 'null') {
+        result[key] = null;
+      }
+    }
+    
+    return Object.keys(result).length > 0 ? result : null;
+  } catch {
+    return null;
   }
 };
 
@@ -542,8 +791,8 @@ export const generateInitialProjectAnalysis = async (
       overallConfidence: 20,
       summary: "Project initialized. Awaiting data sources.",
       tasks: [
-        { title: "Connect first data source", type: "missing", urgency: "high", confidence: 100 },
-        { title: "Define stakeholder list", type: "missing", urgency: "medium", confidence: 100 }
+        { title: "Connect first data source", type: "missing", urgency: "high", confidence: 100, status: 'pending' as const, createdAt: new Date().toISOString() },
+        { title: "Define stakeholder list", type: "missing", urgency: "medium", confidence: 100, status: 'pending' as const, createdAt: new Date().toISOString() }
       ]
     };
   }
@@ -1884,7 +2133,7 @@ export const analyzeSource = async (
     console.error("AI Source Analysis Failed:", error);
     return {
       tasks: [
-        { title: `Review ${sourceName}`, type: 'ambiguity', urgency: 'medium', source: sourceName, confidence: 50 }
+        { title: `Review ${sourceName}`, type: 'ambiguity', urgency: 'medium', source: sourceName, confidence: 50, status: 'pending' as const, createdAt: new Date().toISOString() }
       ],
       insights: [
         { 
