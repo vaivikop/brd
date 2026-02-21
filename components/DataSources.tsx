@@ -21,11 +21,12 @@ import {
   Eye,
   EyeOff,
   Search,
-  X
+  X,
+  Lightbulb
 } from 'lucide-react';
 import Button from './Button';
 import Tooltip from './Tooltip';
-import { addSourceToProject, ProjectState, Source } from '../utils/db';
+import { addSourceToProject, ProjectState, Source, reanalyzeAllSources, InsightExtractionProgress } from '../utils/db';
 import { useToast } from '../context/ToastContext';
 import { 
   DatasetLoader, 
@@ -68,6 +69,10 @@ const DataSources: React.FC<DataSourcesProps> = ({ project, onUpdate, onContinue
   const { showToast } = useToast();
   const datasetFileInputRef = useRef<HTMLInputElement>(null);
   const [activeDatasetUpload, setActiveDatasetUpload] = useState<string | null>(null);
+
+  // Automatic insight extraction state
+  const [isExtractingInsights, setIsExtractingInsights] = useState(false);
+  const [extractionProgress, setExtractionProgress] = useState<InsightExtractionProgress | null>(null);
 
   // Computed values - use project.sources for persisted counts, loadedDatasets for live filtering
   const sourceStats = useMemo(() => {
@@ -429,6 +434,50 @@ const DataSources: React.FC<DataSourcesProps> = ({ project, onUpdate, onContinue
       });
     } finally {
       setIsLoadingDataset(null);
+    }
+  };
+
+  // Handle automatic insight extraction from all sources
+  const handleExtractAllInsights = async () => {
+    if (project.sources.length === 0) {
+      showToast({
+        type: 'error',
+        title: 'No Sources',
+        message: 'Load some data sources first before extracting insights'
+      });
+      return;
+    }
+
+    setIsExtractingInsights(true);
+    setExtractionProgress({
+      currentSource: 0,
+      totalSources: project.sources.length,
+      sourceName: '',
+      insightsExtracted: 0,
+      status: 'running'
+    });
+
+    try {
+      const result = await reanalyzeAllSources((progress) => {
+        setExtractionProgress(progress);
+      });
+
+      onUpdate(result.project);
+
+      showToast({
+        type: 'success',
+        title: 'Insights Extracted',
+        message: `Generated ${result.insightsGenerated} new insights from ${result.sourcesProcessed} sources`
+      });
+    } catch (error: any) {
+      showToast({
+        type: 'error',
+        title: 'Extraction Failed',
+        message: error.message || 'Failed to extract insights'
+      });
+    } finally {
+      setIsExtractingInsights(false);
+      setExtractionProgress(null);
     }
   };
 
@@ -825,6 +874,84 @@ const DataSources: React.FC<DataSourcesProps> = ({ project, onUpdate, onContinue
                   </div>
                   <p className="text-xs text-slate-500">Ambiguous items flagged for review.</p>
                 </div>
+              </div>
+
+              {/* Automatic Insight Extraction */}
+              <div className="bg-gradient-to-r from-amber-50 to-orange-50 p-6 rounded-2xl border border-amber-200">
+                <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
+                  <div className="flex items-center gap-3">
+                    <div className="p-2 bg-white rounded-xl border border-amber-200">
+                      <Lightbulb className="h-5 w-5 text-amber-600" />
+                    </div>
+                    <div>
+                      <h3 className="font-bold text-slate-900">Automatic Insight Generator</h3>
+                      <p className="text-sm text-slate-600">
+                        Extract insights from all loaded sources using AI analysis
+                      </p>
+                    </div>
+                  </div>
+                  <Button
+                    variant="primary"
+                    size="sm"
+                    onClick={handleExtractAllInsights}
+                    disabled={isExtractingInsights || connectedCount === 0}
+                    className="rounded-xl bg-amber-600 hover:bg-amber-700"
+                  >
+                    {isExtractingInsights ? (
+                      <>
+                        <Loader className="h-4 w-4 animate-spin mr-2" />
+                        Extracting...
+                      </>
+                    ) : (
+                      <>
+                        <Sparkles className="h-4 w-4 mr-2" />
+                        Extract All Insights
+                      </>
+                    )}
+                  </Button>
+                </div>
+                
+                {/* Progress Bar */}
+                {isExtractingInsights && extractionProgress && (
+                  <div className="mt-4 space-y-2">
+                    <div className="flex items-center justify-between text-sm">
+                      <span className="text-slate-600">
+                        Processing: {extractionProgress.sourceName || 'Starting...'}
+                      </span>
+                      <span className="text-amber-700 font-medium">
+                        {extractionProgress.currentSource}/{extractionProgress.totalSources} sources
+                      </span>
+                    </div>
+                    <div className="w-full h-2 bg-amber-200 rounded-full overflow-hidden">
+                      <div 
+                        className="h-full bg-amber-600 rounded-full transition-all duration-300 ease-out"
+                        style={{ 
+                          width: `${Math.round((extractionProgress.currentSource / extractionProgress.totalSources) * 100)}%` 
+                        }}
+                      />
+                    </div>
+                    <div className="text-xs text-emerald-600 font-medium">
+                      {extractionProgress.insightsExtracted} insights extracted so far
+                    </div>
+                  </div>
+                )}
+
+                {/* Current Insights Count */}
+                {!isExtractingInsights && (
+                  <div className="mt-4 flex items-center gap-4 text-sm">
+                    <span className="text-slate-600">
+                      Current insights: 
+                    </span>
+                    <span className="px-2 py-1 bg-white text-amber-700 rounded-lg font-medium border border-amber-200">
+                      {project.insights?.length || 0} insights extracted
+                    </span>
+                    {connectedCount === 0 && (
+                      <span className="text-slate-500 text-xs">
+                        (Load sources above to enable extraction)
+                      </span>
+                    )}
+                  </div>
+                )}
               </div>
             </div>
           )}

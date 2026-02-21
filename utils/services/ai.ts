@@ -4,7 +4,7 @@ import { Task, Insight, BRDSection } from "../db";
 const ai = new GoogleGenAI({ apiKey: import.meta.env.VITE_GEMINI_API_KEY });
 
 // Use the cheapest, fastest model with optimized settings
-const modelId = "gemini-2.5-flash";
+const modelId = "gemini-3-pro-preview";
 
 // ============================================================================
 // AI SPEED OPTIMIZATIONS
@@ -410,7 +410,7 @@ const simpleRepair = (json: string): string => {
   return json;
 };
 
-const safeJsonParse = <T>(text: string, fallback: T): T => {
+export const safeJsonParse = <T>(text: string, fallback: T): T => {
   try {
     return JSON.parse(text);
   } catch (e: any) {
@@ -800,9 +800,16 @@ export const generateInitialProjectAnalysis = async (
 
 export const generateBRD = async (
   project: { name: string; description?: string; goals?: string },
-  insights: Insight[]
+  insights: Insight[],
+  connectedSources?: { id: string; type: string; name: string; content?: string; fileType?: string }[]
 ): Promise<Omit<BRDSection, 'id'>[]> => {
   const approvedInsights = insights.filter(i => i.status === 'approved');
+  const sources = connectedSources || [];
+  
+  // Validate that we have sources connected
+  if (sources.length === 0 && approvedInsights.length === 0) {
+    throw new Error('Cannot generate BRD without connected sources. Please connect data sources (emails, meetings, transcripts, etc.) and extract insights before generating the BRD.');
+  }
   
   // Categorize insights by type and priority
   const mustHave = approvedInsights.filter(i => i.priority === 'must');
@@ -823,8 +830,20 @@ export const generateBRD = async (
   // Extract unique stakeholder mentions
   const allStakeholders = [...new Set(approvedInsights.flatMap(i => i.stakeholderMentions || []))];
   
-  // Extract unique sources
-  const allSources = [...new Set(approvedInsights.map(i => i.source))];
+  // Extract unique sources from insights
+  const allInsightSources = [...new Set(approvedInsights.map(i => i.source))];
+  
+  // Build connected sources summary with types
+  const sourcesByType = sources.reduce((acc, s) => {
+    const type = s.type || 'unknown';
+    if (!acc[type]) acc[type] = [];
+    acc[type].push(s.name);
+    return acc;
+  }, {} as Record<string, string[]>);
+  
+  const connectedSourcesSummary = Object.entries(sourcesByType)
+    .map(([type, names]) => `${type.toUpperCase()}: ${names.length} (${names.slice(0, 3).join(', ')}${names.length > 3 ? '...' : ''})`)
+    .join(' | ');
   
   // Format insight for prompt with all metadata
   const formatInsight = (i: Insight) => {
@@ -835,9 +854,10 @@ export const generateBRD = async (
     return `- ${priority} [${i.category.toUpperCase()}] ${i.summary}: ${i.detail} (Source: ${i.source}) ${confidence} ${conflict} ${stakeholderRefs}`;
   };
   
-  // Cache based on project and approved insight summaries
+  // Cache based on project, sources count, and approved insight summaries
   const insightSummaries = approvedInsights.map(i => i.summary).sort().join(',');
-  const cacheKey = getCacheKey('generateBRD', project.name, project.goals, insightSummaries.slice(0, 300));
+  const sourcesKey = sources.map(s => s.name).sort().join(',').slice(0, 100);
+  const cacheKey = getCacheKey('generateBRD', project.name, project.goals, sourcesKey, insightSummaries.slice(0, 300));
   const cached = getFromCache<Omit<BRDSection, 'id'>[]>(cacheKey);
   if (cached) return cached;
   
@@ -856,10 +876,16 @@ INSIGHT ANALYSIS SUMMARY
 ═══════════════════════════════════════════════════════════════════════════════
 Total Approved Insights: ${approvedInsights.length}
 Average AI Confidence: ${avgConfidence}%
-Data Sources Analyzed: ${allSources.length} (${allSources.slice(0, 5).join(', ')}${allSources.length > 5 ? '...' : ''})
+Connected Data Sources: ${sources.length} total${connectedSourcesSummary ? ` (${connectedSourcesSummary})` : ''}
+Insight Sources Referenced: ${allInsightSources.length} (${allInsightSources.slice(0, 5).join(', ')}${allInsightSources.length > 5 ? '...' : ''})
 Identified Stakeholders: ${allStakeholders.length > 0 ? allStakeholders.join(', ') : 'To be identified'}
 Insights with Conflicts: ${conflictInsights.length} (require resolution)
 Open Questions: ${questions.length}
+
+═══════════════════════════════════════════════════════════════════════════════
+CONNECTED DATA SOURCES
+═══════════════════════════════════════════════════════════════════════════════
+${sources.length > 0 ? sources.map(s => `• ${s.name} (${s.type}${s.fileType ? ' - ' + s.fileType : ''})`).slice(0, 20).join('\n') + (sources.length > 20 ? `\n... and ${sources.length - 20} more sources` : '') : '⚠️ No data sources connected. BRD will be based on approved insights only.'}
 
 Priority Distribution:
 - Must Have (Critical): ${mustHave.length} insights
@@ -995,25 +1021,61 @@ Generate EXACTLY 9 sections following IEEE 830 and BABOK standards:
    ${timelines.length > 0 ? `\n   Reference timeline insights: ${timelines.map(t => t.summary).join('; ')}` : ''}
 
 ═══════════════════════════════════════════════════════════════════════════════
-OUTPUT FORMAT
+OUTPUT FORMAT - PROFESSIONAL MARKDOWN STYLING
 ═══════════════════════════════════════════════════════════════════════════════
 
 For EACH section provide:
 - title: Exact section title from above
-- content: Professional Markdown with:
-  • Clear hierarchy (## for subsections, ### for sub-subsections)
-  • Bullet points for lists
-  • Tables where appropriate (stakeholder matrix, requirement tables)
-  • Specific, actionable language (avoid vague statements)
-  • Reference specific insights where relevant
-  • Flag areas with low confidence or conflicts needing resolution
+- content: Professional, presentation-ready Markdown following these formatting rules:
+
+**DOCUMENT STRUCTURE:**
+  • Use ## for major subsections, ### for sub-subsections
+  • Start each section with a brief 1-2 sentence overview paragraph
+  • Use horizontal rules (---) to separate major topic areas within long sections
+
+**VISUAL FORMATTING:**
+  • Use **bold** for key terms, metrics, and important concepts
+  • Use *italics* for emphasis and technical terms on first mention
+  • Use \`inline code\` for system names, API endpoints, and technical identifiers
+  • Use blockquotes (>) for key takeaways, critical notes, or executive highlights
+
+**LISTS & BULLETS:**
+  • Use numbered lists (1. 2. 3.) for sequential steps, prioritized items, or ranked requirements
+  • Use bullet points (-) for non-sequential items
+  • Indent sub-items properly for visual hierarchy
+  • Keep bullet points concise (1-2 lines each)
+
+**TABLES (use for structured data):**
+  • Stakeholder RACI matrix
+  • Requirements priority matrix
+  • Success metrics with targets
+  • Timeline milestones table
+  • Risk assessment matrix
+  Format: | Column 1 | Column 2 | Column 3 |
+
+**CALLOUTS & HIGHLIGHTS:**
+  • Use ⚠️ for warnings, risks, and conflicts
+  • Use ✅ for confirmed/validated items
+  • Use 📋 for action items
+  • Use 💡 for recommendations
+  • Use 🎯 for key objectives/targets
+  • Use 📊 for metrics and KPIs
+  • Use 🔗 for dependencies and integrations
+
+**PROFESSIONAL TONE:**
+  • Write in active voice when possible
+  • Be specific with numbers, dates, and measurable criteria
+  • Avoid vague language like "various", "several", "etc."
+  • Reference specific insights by name where relevant
+  • Flag areas with low confidence using: ⚠️ *Requires validation*
+
 - sources: Array of source names that informed this section
 - confidence: Score 0-100 based on:
   • Insight coverage and quality
   • Presence of conflicts (reduce confidence)
   • Specificity of available information
 
-Return JSON array of exactly 9 section objects. Be comprehensive yet concise - a production-ready BRD.
+Return JSON array of exactly 9 section objects. Generate a polished, executive-ready BRD suitable for stakeholder review.
   `;
 
   try {
@@ -1098,7 +1160,14 @@ Return the COMPLETE updated BRD with all 9 sections (even if only some were modi
 
 For each section:
 - title: The section title (keep original titles)
-- content: Updated Markdown content
+- content: Professional Markdown following these standards:
+  • **Bold** for key terms, metrics, important concepts
+  • *Italics* for emphasis and technical terms
+  • \`code\` for system names and identifiers
+  • Tables (| Col1 | Col2 |) for structured data
+  • Numbered lists for priorities, bullets for other items
+  • Use ## for subsections, ### for sub-subsections
+  • Callouts: ⚠️ risks, ✅ confirmed, 💡 recommendations, 🎯 targets, 📊 metrics, 🔗 dependencies
 - sources: Preserved or updated source array
 - confidence: Adjusted confidence (0-100) - may decrease if adding speculative content
   `;
@@ -1190,6 +1259,14 @@ ANALYSIS TASK
    - Updated content meeting IEEE 830/BABOK standards
    - Clear reasoning for each change
    - References to insights used (if any)
+
+   **Markdown Formatting Standards for content:**
+   - **Bold** for key terms, metrics, important concepts
+   - *Italics* for emphasis and technical terms
+   - \`code\` for system names and identifiers
+   - Tables (| Col1 | Col2 |) for structured data
+   - ## for subsections, ### for sub-subsections
+   - Callouts: ⚠️ risks, ✅ confirmed, 💡 recommendations, 🎯 targets, 📊 metrics
 
 3. Impact assessment:
    - Consider downstream effects on other sections
@@ -2171,7 +2248,7 @@ interface GenerationProgress {
   section: string;
 }
 
-const TEMPLATE_SECTIONS: Record<BRDTemplate, string[]> = {
+export const TEMPLATE_SECTIONS: Record<BRDTemplate, string[]> = {
   enterprise: [
     'Executive Summary',
     'Business Objectives', 
@@ -2253,11 +2330,18 @@ export const generateBRDAdvanced = async (
   project: { name: string; description?: string; goals?: string },
   insights: Insight[],
   options: BRDGenerationOptions,
-  onProgress?: (progress: GenerationProgress) => void
+  onProgress?: (progress: GenerationProgress) => void,
+  connectedSources?: { id: string; type: string; name: string; content?: string; fileType?: string }[]
 ): Promise<Omit<BRDSection, 'id'>[]> => {
   const { template, audience, tone } = options;
   const sections = TEMPLATE_SECTIONS[template];
   const approvedInsights = insights.filter(i => i.status === 'approved');
+  const sources = connectedSources || [];
+  
+  // Validate that we have sources connected
+  if (sources.length === 0 && approvedInsights.length === 0) {
+    throw new Error('Cannot generate BRD without connected sources. Please connect data sources (emails, meetings, transcripts, etc.) and extract insights before generating the BRD.');
+  }
   
   // Categorize insights
   const requirements = approvedInsights.filter(i => i.category === 'requirement');
@@ -2266,8 +2350,20 @@ export const generateBRDAdvanced = async (
   const timelines = approvedInsights.filter(i => i.category === 'timeline');
   const questions = approvedInsights.filter(i => i.category === 'question');
   
-  // Extract unique sources
-  const allSources = [...new Set(approvedInsights.map(i => i.source))];
+  // Extract unique sources from insights
+  const allInsightSources = [...new Set(approvedInsights.map(i => i.source))];
+  
+  // Build connected sources summary with types
+  const sourcesByType = sources.reduce((acc, s) => {
+    const type = s.type || 'unknown';
+    if (!acc[type]) acc[type] = [];
+    acc[type].push(s.name);
+    return acc;
+  }, {} as Record<string, string[]>);
+  
+  const connectedSourcesSummary = Object.entries(sourcesByType)
+    .map(([type, names]) => `${type.toUpperCase()}: ${names.length} (${names.slice(0, 3).join(', ')}${names.length > 3 ? '...' : ''})`)
+    .join(' | ');
   
   // Calculate average confidence
   const avgConfidence = approvedInsights.length > 0 
@@ -2289,7 +2385,8 @@ INSIGHTS SUMMARY
 ═══════════════════════════════════════════════════════════════════════════════
 Total Approved: ${approvedInsights.length}
 Average Confidence: ${avgConfidence}%
-Sources: ${allSources.slice(0, 10).join(', ')}
+Connected Data Sources: ${sources.length} total${connectedSourcesSummary ? ` (${connectedSourcesSummary})` : ''}
+Insight Sources Referenced: ${allInsightSources.slice(0, 10).join(', ')}
 
 By Category:
 - Requirements: ${requirements.length}
@@ -2297,6 +2394,11 @@ By Category:
 - Stakeholders: ${stakeholders.length}
 - Timelines: ${timelines.length}
 - Questions: ${questions.length}
+
+═══════════════════════════════════════════════════════════════════════════════
+CONNECTED DATA SOURCES
+═══════════════════════════════════════════════════════════════════════════════
+${sources.length > 0 ? sources.map(s => `• ${s.name} (${s.type}${s.fileType ? ' - ' + s.fileType : ''})`).slice(0, 20).join('\n') + (sources.length > 20 ? `\n... and ${sources.length - 20} more sources` : '') : '⚠️ No data sources connected. BRD will be based on approved insights only.'}
 
 Key Insights:
 ${approvedInsights.slice(0, 20).map(i => `- [${i.category.toUpperCase()}] ${i.summary} (${i.confidence} confidence, Source: ${i.source})`).join('\n')}
@@ -2318,17 +2420,44 @@ TONE: ${tone.toUpperCase()}
 ${TONE_GUIDANCE[tone]}
 
 ═══════════════════════════════════════════════════════════════════════════════
-OUTPUT REQUIREMENTS
+OUTPUT REQUIREMENTS - PROFESSIONAL MARKDOWN STYLING
 ═══════════════════════════════════════════════════════════════════════════════
 For EACH section provide:
 - title: Exact section title
-- content: Rich Markdown content with proper headings, bullet points, and tables where appropriate
+- content: Polished, executive-ready Markdown following these formatting standards:
+
+  **Document Structure:**
+  - Use ## for major subsections, ### for sub-subsections
+  - Start with a brief overview paragraph
+  - Use --- horizontal rules between major topics
+
+  **Visual Formatting:**
+  - **Bold** for key terms, metrics, and important concepts
+  - *Italics* for emphasis and technical terms (first mention)
+  - \`code\` for system names, APIs, technical identifiers
+  - Blockquotes (>) for executive summaries and key takeaways
+
+  **Lists & Tables:**
+  - Numbered lists for sequential/prioritized items
+  - Bullet points (-) for non-sequential items
+  - Tables (| Col1 | Col2 |) for matrices, priorities, metrics, timelines
+  - Keep bullet points concise (max 2 lines)
+
+  **Professional Callouts:**
+  - ⚠️ Risks/warnings/conflicts
+  - ✅ Confirmed/validated items
+  - 📋 Action items
+  - 💡 Recommendations
+  - 🎯 Objectives/targets
+  - 📊 Metrics/KPIs
+  - 🔗 Dependencies/integrations
+
 - sources: Array of source names that informed this section
 - confidence: 0-100 score based on insight coverage
 
 Additional Requirements:
 - Cross-reference insights throughout
-- Mark areas with low confidence or gaps
+- Mark areas with low confidence: ⚠️ *Requires validation*
 - Use ${tone} tone consistently
 - Optimize for ${audience} audience
 - Follow ${template} methodology best practices
@@ -2337,7 +2466,31 @@ Return JSON array of ${sections.length} section objects.
 `;
 
   try {
-    onProgress?.({ current: 1, total: sections.length, section: 'Initializing AI generation...' });
+    // Start with clear message indicating all sections generate together
+    onProgress?.({ current: 0, total: sections.length, section: 'Preparing to generate BRD...' });
+    
+    // Run progress simulation DURING AI call (not after)
+    // This provides visual feedback while waiting for the API response
+    let progressInterval: NodeJS.Timeout | null = null;
+    let currentStep = 0;
+    const totalSteps = sections.length;
+    
+    // Simulate progress through sections while AI is working
+    const startProgressSimulation = () => {
+      progressInterval = setInterval(() => {
+        if (currentStep < totalSteps - 1) { // Don't complete until AI actually returns
+          currentStep++;
+          const sectionName = sections[Math.min(currentStep, sections.length - 1)];
+          onProgress?.({ 
+            current: currentStep, 
+            total: totalSteps, 
+            section: `Generating: ${sectionName}...` 
+          });
+        }
+      }, 1500); // Progress every 1.5 seconds for realistic feel
+    };
+    
+    startProgressSimulation();
     
     trackAPICall();
     const response = await ai.models.generateContent({
@@ -2361,6 +2514,11 @@ Return JSON array of ${sections.length} section objects.
         }
       }
     });
+    
+    // Stop the progress simulation
+    if (progressInterval) {
+      clearInterval(progressInterval);
+    }
 
     const text = response.text;
     if (!text) throw new Error("No response from AI");
@@ -2371,10 +2529,10 @@ Return JSON array of ${sections.length} section objects.
       throw new Error("Failed to parse BRD sections from AI response");
     }
     
-    // Simulate progress through sections
+    // Quick final progress showing completion of actual generated sections
     for (let i = 0; i < result.length; i++) {
-      onProgress?.({ current: i + 1, total: result.length, section: `Generated: ${result[i].title}` });
-      await new Promise(resolve => setTimeout(resolve, 100)); // Small delay for visual effect
+      onProgress?.({ current: i + 1, total: result.length, section: `Completed: ${result[i].title}` });
+      await new Promise(resolve => setTimeout(resolve, 50)); // Faster to show completion
     }
     
     return result;
@@ -2423,7 +2581,14 @@ REQUIREMENTS
 - Maintain the same section title
 - Apply the refinement instruction
 - Reference relevant insights
-- Output only the refined content, formatted in Markdown
+
+**Markdown Formatting Standards:**
+- **Bold** for key terms and metrics
+- *Italics* for emphasis and technical terms
+- \`code\` for system names and identifiers
+- Tables for structured data (| Col1 | Col2 |)
+- Numbered lists for priorities, bullet points for other items
+- Use callouts: ⚠️ risks, ✅ confirmed, 💡 recommendations, 🎯 targets, 📊 metrics
 
 Return JSON with 'content' (string) and 'confidence' (integer 0-100).
 `;

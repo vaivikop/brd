@@ -38,6 +38,47 @@ import { ProjectState, BRDSection, updateBRD, updateProjectStatus, getProjectSta
 import { generateBRD, refineBRD } from '../utils/services/ai';
 import { quickExportBRD } from '../utils/pdfExport';
 import { SourceBadge, inferSourceType } from '../utils/sourceIcons';
+import { computeWordDiff, WordDiff } from '../utils/diffUtils';
+
+// Inline word diff component for highlighting individual changed words
+interface InlineWordDiffProps {
+  oldContent: string;
+  newContent: string;
+}
+
+const InlineWordDiff: React.FC<InlineWordDiffProps> = ({ oldContent, newContent }) => {
+  const wordDiff = computeWordDiff(oldContent, newContent);
+  
+  return (
+    <div className="prose prose-slate max-w-none prose-headings:text-slate-900 prose-p:text-slate-600 prose-p:leading-relaxed">
+      <div className="text-slate-700 leading-relaxed whitespace-pre-wrap">
+        {wordDiff.map((word, index) => {
+          if (word.type === 'added') {
+            return (
+              <span
+                key={index}
+                className="bg-emerald-200 text-emerald-900 px-0.5 rounded font-semibold"
+              >
+                {word.text}
+              </span>
+            );
+          } else if (word.type === 'removed') {
+            return (
+              <span
+                key={index}
+                className="bg-red-200 text-red-800 px-0.5 rounded line-through opacity-60"
+              >
+                {word.text}
+              </span>
+            );
+          } else {
+            return <span key={index}>{word.text}</span>;
+          }
+        })}
+      </div>
+    </div>
+  );
+};
 
 interface BRDGenerationProps {
   project: ProjectState;
@@ -66,6 +107,9 @@ const BRDGeneration: React.FC<BRDGenerationProps> = ({ project, onUpdate, onCont
   const [generationError, setGenerationError] = useState<string | null>(null);
   const [showFinalizeSuccess, setShowFinalizeSuccess] = useState(false);
   
+  // Track previous section content for word-level diff
+  const previousSectionsRef = useRef<Map<string, string>>(new Map());
+  
   const documentRef = useRef<HTMLDivElement>(null);
 
   const brd = project.brd;
@@ -93,7 +137,8 @@ const BRDGeneration: React.FC<BRDGenerationProps> = ({ project, onUpdate, onCont
     try {
       const sectionsData = await generateBRD(
         { name: project.name, description: project.description, goals: project.goals },
-        project.insights || []
+        project.insights || [],
+        project.sources || []
       );
       
       const newBRD = {
@@ -123,6 +168,11 @@ const BRDGeneration: React.FC<BRDGenerationProps> = ({ project, onUpdate, onCont
     try {
       const refinedSections = await refineBRD({ sections: brd.sections }, editPrompt);
       
+      // Store current content before updating for diff comparison
+      brd.sections.forEach(s => {
+        previousSectionsRef.current.set(s.id, s.content);
+      });
+      
       // Identify what changed (simple title match for now)
       const changedIds: string[] = [];
       const newSections = refinedSections.map((s, i) => {
@@ -149,7 +199,10 @@ const BRDGeneration: React.FC<BRDGenerationProps> = ({ project, onUpdate, onCont
       await addActivityLog(`BRD refined: "${editPrompt.slice(0, 50)}..."`, 'AI Agent');
       
       // Clear highlights after 5 seconds
-      setTimeout(() => setLastChangedSectionIds([]), 5000);
+      setTimeout(() => {
+        setLastChangedSectionIds([]);
+        previousSectionsRef.current.clear();
+      }, 8000);
     } catch (error) {
       console.error("Failed to refine BRD", error);
       setGenerationError(error instanceof Error ? error.message : "Failed to refine BRD. Please try again.");
@@ -551,7 +604,14 @@ const BRDGeneration: React.FC<BRDGenerationProps> = ({ project, onUpdate, onCont
                             </div>
                           ) : (
                             <div className="prose prose-slate max-w-none prose-headings:text-slate-900 prose-p:text-slate-600 prose-p:leading-relaxed prose-strong:text-slate-900 prose-ul:text-slate-600 prose-table:w-full prose-th:bg-slate-100 prose-th:border prose-th:border-slate-200 prose-th:px-4 prose-th:py-2 prose-th:text-left prose-th:font-semibold prose-th:text-slate-700 prose-td:border prose-td:border-slate-200 prose-td:px-4 prose-td:py-2 prose-td:text-slate-600 print:prose-p:text-black print:prose-headings:text-black">
-                              <Markdown remarkPlugins={[remarkGfm]}>{section.content}</Markdown>
+                              {lastChangedSectionIds.includes(section.id) && previousSectionsRef.current.has(section.id) ? (
+                                <InlineWordDiff 
+                                  oldContent={previousSectionsRef.current.get(section.id)!} 
+                                  newContent={section.content} 
+                                />
+                              ) : (
+                                <Markdown remarkPlugins={[remarkGfm]}>{section.content}</Markdown>
+                              )}
                             </div>
                           )}
                           

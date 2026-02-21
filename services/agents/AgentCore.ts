@@ -185,7 +185,7 @@ export interface AgentConfig {
 // ============================================================================
 
 export const DEFAULT_AGENT_CONFIG: AgentConfig = {
-  modelId: 'gemini-2.5-flash',
+  modelId: 'gemini-3-pro-preview',
   maxConcurrentGoals: 3,
   defaultApprovalRequired: true,
   autoRetryFailures: true,

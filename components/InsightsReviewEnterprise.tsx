@@ -458,9 +458,9 @@ const InsightRowComponent = (props: {
                       <ThumbsUp className="h-4 w-4" />
                     </button>
                   </Tooltip>
-                  <Tooltip content="Flag">
+                  <Tooltip content="Mark for Review">
                     <button 
-                      onClick={() => handleStatusChange(insight.id, 'flagged')}
+                      onClick={() => handleStatusChange(insight.id, insight.status === 'flagged' ? 'pending' : 'flagged')}
                       className={`p-2 rounded-lg transition-all ${
                         insight.status === 'flagged' 
                           ? 'bg-amber-500 text-white' 
@@ -489,14 +489,6 @@ const InsightRowComponent = (props: {
                       className="p-2 rounded-lg text-slate-400 hover:bg-violet-50 hover:text-violet-600 transition-all"
                     >
                       <Edit3 className="h-4 w-4" />
-                    </button>
-                  </Tooltip>
-                  <Tooltip content={isExpanded ? "Collapse" : "Expand"}>
-                    <button 
-                      onClick={() => setExpandedInsightId(isExpanded ? null : insight.id)}
-                      className="p-2 rounded-lg text-slate-400 hover:bg-slate-100 transition-all"
-                    >
-                      <ChevronDown className={`h-4 w-4 transition-transform duration-200 ${isExpanded ? 'rotate-180' : ''}`} />
                     </button>
                   </Tooltip>
                 </>
@@ -566,34 +558,7 @@ const InsightRowComponent = (props: {
             )}
           </div>
           
-          {/* Expanded Content */}
-          {isExpanded && (
-            <div className="mt-3 pt-3 border-t border-slate-100 flex-1 overflow-hidden">
-              <div className="bg-slate-50 rounded-lg p-3 text-sm text-slate-700 leading-relaxed max-h-28 overflow-y-auto">
-                {insight.detail}
-              </div>
-              
-              {insight.stakeholderMentions && insight.stakeholderMentions.length > 0 && (
-                <div className="flex items-center gap-2 mt-2 p-2 bg-violet-50/50 border border-violet-100 rounded-lg">
-                  <Users className="h-3.5 w-3.5 text-violet-500 shrink-0" />
-                  <span className="text-xs text-violet-600 font-medium">Stakeholders:</span>
-                  <div className="flex flex-wrap gap-1">
-                    {insight.stakeholderMentions.slice(0, 4).map((s, i) => (
-                      <span key={i} className="text-xs bg-violet-500 text-white px-1.5 py-0.5 rounded">{s}</span>
-                    ))}
-                    {insight.stakeholderMentions.length > 4 && (
-                      <span className="text-xs text-violet-500 font-medium">+{insight.stakeholderMentions.length - 4}</span>
-                    )}
-                  </div>
-                </div>
-              )}
-              
-              <CommentsSection
-                comments={insight.comments || []}
-                onAddComment={(text) => handleAddComment(insight.id, text)}
-              />
-            </div>
-          )}
+
         </div>
       </div>
     </div>

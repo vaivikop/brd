@@ -520,13 +520,13 @@ const InsightsReview: React.FC<InsightsReviewProps> = ({ project, onUpdate, onCo
                                 <ThumbsUp className="h-4 w-4" />
                               </button>
                               <button 
-                                onClick={() => handleStatusChange(insight.id, 'flagged')}
+                                onClick={() => handleStatusChange(insight.id, insight.status === 'flagged' ? 'pending' : 'flagged')}
                                 className={`p-2 rounded-lg transition-all ${
                                   insight.status === 'flagged' 
                                     ? 'bg-amber-500 text-white shadow-md' 
                                     : 'bg-slate-100 text-slate-400 hover:bg-amber-100 hover:text-amber-600'
                                 }`}
-                                title="Flag for discussion"
+                                title="Mark for review"
                               >
                                 <Flag className="h-4 w-4" />
                               </button>
@@ -597,7 +597,7 @@ const InsightsReview: React.FC<InsightsReviewProps> = ({ project, onUpdate, onCo
                     'bg-slate-100 text-slate-500'
                   }`}>
                     {insight.status === 'approved' && <><CheckCircle2 className="h-3.5 w-3.5" /> Approved - will be included in BRD</>}
-                    {insight.status === 'flagged' && <><Flag className="h-3.5 w-3.5" /> Flagged - needs team discussion</>}
+                    {insight.status === 'flagged' && <><Flag className="h-3.5 w-3.5" /> Marked for review - needs further discussion</>}
                     {insight.status === 'rejected' && <><X className="h-3.5 w-3.5" /> Not relevant - excluded from BRD</>}
                     <button 
                       onClick={() => handleStatusChange(insight.id, 'pending')}

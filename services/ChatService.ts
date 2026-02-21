@@ -160,7 +160,7 @@ export interface ChatResponse {
 // ============================================================================
 
 const API_KEY = import.meta.env.VITE_GEMINI_API_KEY || '';
-const MODEL_ID = 'gemini-2.0-flash';
+const MODEL_ID = 'gemini-3-pro-preview';
 
 const INTENT_PATTERNS: Record<IntentType, RegExp[]> = {
   query_information: [
@@ -728,14 +728,7 @@ export class ClarityChatService {
     // Determine actions locally first
     const localActions = this.determineActions(intent, entities, message, context);
 
-    // Check cache for similar queries
-    const cacheKey = this.cache.generateKey(
-      message.toLowerCase().trim(),
-      intent.primary,
-      context.name,
-      context.brd?.sections.length
-    );
-    const cachedResponse = this.cache.get<string>(cacheKey);
+    // LIVE AI MODE: Skip caching entirely for real-time responses
 
     let responseMessage: string;
     let aiActions = localActions;
@@ -749,25 +742,17 @@ export class ClarityChatService {
     const pendingTasks = context.tasks.filter(t => t.status !== 'completed');
     const pendingInsights = context.insights.filter(i => i.status === 'pending');
 
-    // Handle common queries locally for instant responses
-    const localResponse = this.handleLocalQuery(normalizedMessage, context, highPriorityTasks, pendingTasks, pendingInsights);
-    
-    if (localResponse) {
-      responseMessage = localResponse;
-      confidence = 95;
-    } else if (intent.primary === 'greeting') {
-      responseMessage = this.getRandomTemplate('greeting');
-    } else if (intent.primary === 'provide_feedback' && this.conversationState.pendingAction) {
+    // ALWAYS USE LIVE AI - No local query handling or caching
+    // Only handle confirmations locally since they're direct user responses
+    if (intent.primary === 'provide_feedback' && this.conversationState.pendingAction) {
       // Handle confirmation - already processed in determineActions
       if (localActions.length > 0) {
         responseMessage = `Got it! I'll ${localActions[0].description}.`;
       } else {
         responseMessage = "Okay, I've cancelled that action.";
       }
-    } else if (cachedResponse && localActions.length === 0) {
-      responseMessage = cachedResponse;
     } else {
-      // Generate AI response for complex queries
+      // Generate AI response for ALL queries - 100% live
       try {
         const aiResponse = await this.callAI(message, context, history, intent, entities, localActions);
         responseMessage = aiResponse.message;
@@ -779,10 +764,7 @@ export class ClarityChatService {
         
         confidence = aiResponse.confidence || intent.confidence;
 
-        // Cache successful responses for queries
-        if (intent.primary === 'query_information' && aiActions.length === 0) {
-          this.cache.set(cacheKey, responseMessage, 300000);
-        }
+        // No caching - always fresh AI responses
       } catch (error) {
         console.error('AI call failed:', error);
         responseMessage = this.generateFallbackResponse(intent, entities, context);
@@ -817,7 +799,7 @@ export class ClarityChatService {
         totalTime: Date.now() - startTime,
         intentClassificationTime: intentTime,
         responseGenerationTime: responseTime,
-        cached: !!cachedResponse,
+        cached: false, // Always live AI - no caching
       },
     };
   }

@@ -17,7 +17,8 @@ import {
   Eye,
   FileText,
   ChevronRight,
-  RotateCcw
+  RotateCcw,
+  GitCompare
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import Markdown from 'react-markdown';
@@ -25,6 +26,71 @@ import Button from './Button';
 import Tooltip from './Tooltip';
 import { ProjectState, BRDSection, updateBRD } from '../utils/db';
 import { proposeBRDEdit, BRDEditProposal } from '../utils/services/ai';
+import { computeLineDiff, computeWordDiff, DiffLine, DiffResult } from '../utils/diffUtils';
+
+// Word-level diff visualization component
+interface DiffViewProps {
+  oldContent: string;
+  newContent: string;
+}
+
+const DiffView: React.FC<DiffViewProps> = ({ oldContent, newContent }) => {
+  // Compute word-level diff for inline highlighting
+  const wordDiff = computeWordDiff(oldContent, newContent);
+  
+  const hasChanges = wordDiff.some(w => w.type !== 'unchanged');
+  
+  if (!hasChanges) {
+    return <p className="text-sm text-slate-500 italic">No changes detected</p>;
+  }
+
+  // Count changes
+  const addedCount = wordDiff.filter(w => w.type === 'added').length;
+  const removedCount = wordDiff.filter(w => w.type === 'removed').length;
+
+  return (
+    <div className="rounded-xl border border-slate-200 overflow-hidden">
+      {/* Diff summary header */}
+      <div className="flex items-center gap-4 px-4 py-2 bg-slate-50 border-b border-slate-200">
+        <span className="flex items-center gap-1.5 text-emerald-600 font-semibold text-sm">
+          <span className="w-5 h-5 flex items-center justify-center rounded bg-emerald-100 text-xs">+</span>
+          {addedCount} words added
+        </span>
+        <span className="flex items-center gap-1.5 text-red-600 font-semibold text-sm">
+          <span className="w-5 h-5 flex items-center justify-center rounded bg-red-100 text-xs">-</span>
+          {removedCount} words removed
+        </span>
+      </div>
+      
+      {/* Inline word diff */}
+      <div className="p-4 bg-white text-sm leading-relaxed">
+        {wordDiff.map((word, index) => {
+          if (word.type === 'added') {
+            return (
+              <span
+                key={index}
+                className="bg-emerald-200 text-emerald-900 px-0.5 rounded font-medium"
+              >
+                {word.text}
+              </span>
+            );
+          } else if (word.type === 'removed') {
+            return (
+              <span
+                key={index}
+                className="bg-red-200 text-red-900 px-0.5 rounded line-through opacity-75"
+              >
+                {word.text}
+              </span>
+            );
+          } else {
+            return <span key={index}>{word.text}</span>;
+          }
+        })}
+      </div>
+    </div>
+  );
+};
 
 interface BRDEditProps {
   project: ProjectState;
@@ -38,6 +104,7 @@ const BRDEdit: React.FC<BRDEditProps> = ({ project, onUpdate, onBack }) => {
   const [proposal, setProposal] = useState<BRDEditProposal | null>(null);
   const [activeSectionId, setActiveSectionId] = useState<string | null>(null);
   const [isApplying, setIsApplying] = useState(false);
+  const [showDiff, setShowDiff] = useState(true); // Toggle between diff view and preview
   
   const brd = project.brd;
   const sections = brd?.sections || [];
@@ -122,7 +189,20 @@ const BRDEdit: React.FC<BRDEditProps> = ({ project, onUpdate, onBack }) => {
               <FileText className="h-5 w-5 text-slate-400" />
               <span className="text-sm font-bold text-slate-700 uppercase tracking-wider">Document Preview</span>
             </div>
-            <div className="flex items-center gap-2">
+            <div className="flex items-center gap-3">
+              {proposal && (
+                <button
+                  onClick={() => setShowDiff(!showDiff)}
+                  className={`flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs font-bold transition-all ${
+                    showDiff
+                      ? 'bg-blue-100 text-blue-700 border border-blue-200'
+                      : 'bg-slate-100 text-slate-600 border border-slate-200 hover:bg-slate-200'
+                  }`}
+                >
+                  <GitCompare className="h-3.5 w-3.5" />
+                  {showDiff ? 'Diff View' : 'Preview'}
+                </button>
+              )}
               <span className="text-[10px] font-bold text-slate-400 uppercase">v{brd?.version}.0</span>
             </div>
           </div>
@@ -161,7 +241,11 @@ const BRDEdit: React.FC<BRDEditProps> = ({ project, onUpdate, onBack }) => {
                       {update ? (
                         <div className="relative">
                           <div className="absolute -inset-4 bg-emerald-50/50 rounded-2xl -z-10 border border-emerald-100/50"></div>
-                          <Markdown>{update.content}</Markdown>
+                          {showDiff ? (
+                            <DiffView oldContent={section.content} newContent={update.content} />
+                          ) : (
+                            <Markdown>{update.content}</Markdown>
+                          )}
                         </div>
                       ) : (
                         <Markdown>{section.content}</Markdown>

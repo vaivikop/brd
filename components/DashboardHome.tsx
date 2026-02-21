@@ -92,6 +92,11 @@ const DashboardHome: React.FC<DashboardHomeProps> = ({ project, onNavigateToSour
   const [editedGoals, setEditedGoals] = useState(project.goals || '');
   const [isSavingGoals, setIsSavingGoals] = useState(false);
   
+  // Edit User Name
+  const [showEditUserName, setShowEditUserName] = useState(false);
+  const [editedUserName, setEditedUserName] = useState(project.userName || '');
+  const [isSavingUserName, setIsSavingUserName] = useState(false);
+  
   // ============================================================================
   // CLARITY AI CHATBOT - Enterprise Grade
   // ============================================================================
@@ -319,6 +324,31 @@ const DashboardHome: React.FC<DashboardHomeProps> = ({ project, onNavigateToSour
       });
     } finally {
       setIsSavingGoals(false);
+    }
+  };
+
+  // Handle save user name
+  const handleSaveUserName = async () => {
+    setIsSavingUserName(true);
+    try {
+      const updated = await updateProjectContext({ userName: editedUserName.trim() });
+      onUpdateProject?.(updated);
+      setShowEditUserName(false);
+      showToast({
+        type: 'success',
+        title: 'Name Updated',
+        message: 'Your name has been saved',
+        duration: 3000,
+      });
+    } catch (err) {
+      showToast({
+        type: 'error',
+        title: 'Failed to Save',
+        message: 'Could not update your name',
+        duration: 4000,
+      });
+    } finally {
+      setIsSavingUserName(false);
     }
   };
 
@@ -768,9 +798,15 @@ const DashboardHome: React.FC<DashboardHomeProps> = ({ project, onNavigateToSour
 
     try {
       // Build comprehensive project context for enterprise chat service
+      // Combine goals from both the string field and goalTags array for full context
+      const combinedGoals = [
+        project.goals,
+        ...(project.goalTags || [])
+      ].filter(Boolean).join('\n• ');
+      
       const projectContext: ProjectContext = {
         name: project.name,
-        goals: project.goals,
+        goals: combinedGoals || undefined,
         sources: project.sources.map(s => ({ 
           id: s.id, 
           name: s.name, 
@@ -1075,10 +1111,48 @@ const DashboardHome: React.FC<DashboardHomeProps> = ({ project, onNavigateToSour
 
   return (
     <div className="max-w-7xl mx-auto pb-20">
+      {/* Welcome Banner / Name Prompt */}
+      {!project.userName && (
+        <div className="mb-6 p-4 bg-gradient-to-r from-blue-50 to-indigo-50 rounded-2xl border border-blue-100 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
+          <div className="flex items-center gap-3">
+            <div className="p-2 bg-blue-100 rounded-xl">
+              <Sparkles className="h-5 w-5 text-blue-600" />
+            </div>
+            <div>
+              <h3 className="font-bold text-slate-900">Welcome to ClarityAI!</h3>
+              <p className="text-sm text-slate-600">Add your name for a personalized experience</p>
+            </div>
+          </div>
+          <button
+            onClick={() => {
+              setEditedUserName('');
+              setShowEditUserName(true);
+            }}
+            className="px-4 py-2 bg-blue-600 text-white text-sm font-bold rounded-xl hover:bg-blue-700 transition-colors shadow-lg shadow-blue-500/20"
+          >
+            Add Your Name
+          </button>
+        </div>
+      )}
+
       {/* Header */}
       <header className="mb-6 lg:mb-10 flex flex-col gap-4 lg:gap-6">
         <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
           <div>
+            {project.userName && (
+              <div className="flex items-center gap-2 mb-2">
+                <span className="text-sm text-slate-500">Welcome back,</span>
+                <button 
+                  onClick={() => {
+                    setEditedUserName(project.userName || '');
+                    setShowEditUserName(true);
+                  }}
+                  className="text-sm font-bold text-blue-600 hover:text-blue-700 transition-colors"
+                >
+                  {project.userName}
+                </button>
+              </div>
+            )}
             <div className="flex flex-wrap items-center gap-2 sm:gap-4 mb-2">
               <h1 className="text-2xl sm:text-3xl lg:text-4xl font-extrabold text-slate-900 tracking-tight">{project.name}</h1>
               <span className="px-2 sm:px-3 py-1 rounded-full bg-blue-50 text-blue-700 text-[10px] sm:text-xs font-bold uppercase tracking-widest border border-blue-100">
@@ -1489,7 +1563,11 @@ const DashboardHome: React.FC<DashboardHomeProps> = ({ project, onNavigateToSour
                         </div>
                         {msg.role === 'user' && (
                           <div className="w-8 h-8 rounded-xl bg-slate-200 flex items-center justify-center flex-shrink-0">
-                            <span className="text-sm font-bold text-slate-600">PM</span>
+                            <span className="text-sm font-bold text-slate-600">
+                              {project.userName 
+                                ? project.userName.split(' ').map(n => n[0]).join('').toUpperCase().slice(0, 2)
+                                : 'U'}
+                            </span>
                           </div>
                         )}
                       </div>
@@ -1691,6 +1769,71 @@ const DashboardHome: React.FC<DashboardHomeProps> = ({ project, onNavigateToSour
                   <><Loader2 className="h-4 w-4 animate-spin mr-2" /> Saving...</>
                 ) : (
                   <>Save Goals</>
+                )}
+              </Button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Edit User Name Modal */}
+      {showEditUserName && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 animate-in fade-in duration-200">
+          <div className="bg-white rounded-2xl shadow-2xl max-w-md w-full mx-4 animate-in zoom-in-95 duration-200">
+            <div className="flex items-center justify-between p-6 border-b border-slate-100">
+              <div className="flex items-center gap-3">
+                <div className="p-2 bg-blue-50 rounded-xl">
+                  <Sparkles className="h-5 w-5 text-blue-600" />
+                </div>
+                <h3 className="text-xl font-bold text-slate-900">Your Name</h3>
+              </div>
+              <button 
+                onClick={() => setShowEditUserName(false)}
+                className="p-2 hover:bg-slate-100 rounded-lg transition-colors"
+              >
+                <X className="h-5 w-5 text-slate-400" />
+              </button>
+            </div>
+            
+            <div className="p-6">
+              <label className="block text-sm font-bold text-slate-700 mb-2">
+                What should we call you?
+              </label>
+              <input
+                type="text"
+                value={editedUserName}
+                onChange={(e) => setEditedUserName(e.target.value)}
+                placeholder="Enter your name..."
+                className="w-full p-4 border border-slate-200 rounded-xl text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none"
+                autoFocus
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' && editedUserName.trim()) {
+                    handleSaveUserName();
+                  }
+                }}
+              />
+              <p className="mt-2 text-xs text-slate-500">
+                Your name will be used to personalize the experience and in BRD documents.
+              </p>
+            </div>
+            
+            <div className="flex items-center justify-end gap-3 p-6 border-t border-slate-100 bg-slate-50 rounded-b-2xl">
+              <Button 
+                variant="outline" 
+                onClick={() => setShowEditUserName(false)}
+                disabled={isSavingUserName}
+              >
+                Cancel
+              </Button>
+              <Button 
+                onClick={handleSaveUserName}
+                disabled={isSavingUserName || !editedUserName.trim()}
+                className="min-w-[100px]"
+              >
+                {isSavingUserName ? (
+                  <><Loader2 className="h-4 w-4 animate-spin mr-2" /> Saving...</>
+                ) : (
+                  <>Save</>
                 )}
               </Button>
             </div>

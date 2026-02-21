@@ -50,7 +50,8 @@ import {
   ThumbsUp,
   ThumbsDown,
   MoreHorizontal,
-  Keyboard
+  Keyboard,
+  RotateCcw
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import Markdown from 'react-markdown';
@@ -58,7 +59,7 @@ import remarkGfm from 'remark-gfm';
 import Button from './Button';
 import Tooltip from './Tooltip';
 import { ProjectState, BRDSection, updateBRD, updateProjectStatus, getProjectStats, addActivityLog, Insight } from '../utils/db';
-import { generateBRDAdvanced, refineBRDSection, analyzeGaps, BRDTemplate, BRDAudience, BRDTone } from '../utils/services/ai';
+import { generateBRDAdvanced, refineBRDSection, analyzeGaps, BRDTemplate, BRDAudience, BRDTone, TEMPLATE_SECTIONS } from '../utils/services/ai';
 import { quickExportBRD, exportToWord, exportToHTML, exportToConfluence } from '../utils/pdfExport';
 import { SourceBadge, inferSourceType } from '../utils/sourceIcons';
 import { computeLineDiff, computeWordDiff, WordDiff } from '../utils/diffUtils';
@@ -470,14 +471,17 @@ const BRDGenerationEnterprise: React.FC<BRDGenerationEnterpriseProps> = ({
   const handleGenerate = async () => {
     setIsGenerating(true);
     setGenerationError(null);
-    setGenerationProgress({ current: 0, total: 8, section: 'Preparing...' });
+    // Use actual section count from selected template
+    const templateSectionCount = TEMPLATE_SECTIONS[selectedTemplate]?.length || 9;
+    setGenerationProgress({ current: 0, total: templateSectionCount, section: 'Preparing to generate BRD...' });
     
     try {
       const sectionsData = await generateBRDAdvanced(
         { name: project.name, description: project.description, goals: project.goals },
         project.insights || [],
         { template: selectedTemplate, audience: selectedAudience, tone: selectedTone },
-        (progress) => setGenerationProgress(progress)
+        (progress) => setGenerationProgress(progress),
+        project.sources || []
       );
       
       const newBRD = {
@@ -640,7 +644,7 @@ const BRDGenerationEnterprise: React.FC<BRDGenerationEnterpriseProps> = ({
     const newComment: SectionComment = {
       id: `comment_${Date.now()}`,
       sectionId,
-      author: 'Current User',
+      author: project.userName || 'Current User',
       text: newCommentText,
       timestamp: new Date().toISOString(),
       resolved: false,
@@ -700,7 +704,7 @@ const BRDGenerationEnterprise: React.FC<BRDGenerationEnterpriseProps> = ({
   };
   
   const handleApproveSection = async (sectionId: string, status: SectionApproval['status'], notes?: string) => {
-    const approvalData = { status, approvedBy: 'Current User', approvedAt: new Date().toISOString(), notes };
+    const approvalData = { status, approvedBy: project.userName || 'Current User', approvedAt: new Date().toISOString(), notes };
     setApprovals(prev => prev.map(a => 
       a.sectionId === sectionId 
         ? { ...a, ...approvalData }
@@ -721,7 +725,7 @@ const BRDGenerationEnterprise: React.FC<BRDGenerationEnterpriseProps> = ({
   
   const handleApproveAll = async () => {
     if (!brd) return;
-    const approvalData = { status: 'approved' as const, approvedBy: 'Current User', approvedAt: new Date().toISOString() };
+    const approvalData = { status: 'approved' as const, approvedBy: project.userName || 'Current User', approvedAt: new Date().toISOString() };
     
     // Update local state
     setApprovals(prev => prev.map(a => ({ ...a, ...approvalData })));
@@ -786,7 +790,7 @@ const BRDGenerationEnterprise: React.FC<BRDGenerationEnterpriseProps> = ({
       // Approve all sections when finalizing the BRD
       await handleApproveAll();
       const updated = await updateProjectStatus('Final');
-      await addActivityLog('BRD finalized and all sections approved', 'User');
+      await addActivityLog('BRD finalized and all sections approved', project.userName || 'User');
       onUpdate(updated);
       setShowFinalizeSuccess(true);
       setTimeout(() => {
@@ -1885,6 +1889,36 @@ const BRDGenerationEnterprise: React.FC<BRDGenerationEnterpriseProps> = ({
                                     <span className="text-sm font-medium">Approved by {approval.approvedBy}</span>
                                     <span className="text-xs text-slate-400 ml-2">{new Date(approval.approvedAt!).toLocaleDateString()}</span>
                                   </div>
+                                </div>
+                              ) : approval?.status === 'needs-revision' ? (
+                                <div className="mt-6 pt-6 border-t border-slate-100 print:hidden">
+                                  <div className="flex items-center justify-between">
+                                    <div className="flex items-center gap-2 text-amber-600">
+                                      <AlertCircle className="h-4 w-4" />
+                                      <span className="text-sm font-medium">Marked for revision by {approval.approvedBy}</span>
+                                      <span className="text-xs text-slate-400 ml-2">{new Date(approval.approvedAt!).toLocaleDateString()}</span>
+                                    </div>
+                                    <div className="flex items-center gap-2">
+                                      <Button
+                                        variant="outline"
+                                        size="sm"
+                                        onClick={() => handleApproveSection(section.id, 'pending')}
+                                        className="text-xs border-slate-200 text-slate-600 hover:bg-slate-50"
+                                      >
+                                        <RotateCcw className="h-3.5 w-3.5 mr-1" /> Reset
+                                      </Button>
+                                      <Button
+                                        size="sm"
+                                        onClick={() => handleApproveSection(section.id, 'approved')}
+                                        className="text-xs bg-emerald-600 hover:bg-emerald-700"
+                                      >
+                                        <CheckCircle2 className="h-3.5 w-3.5 mr-1" /> Approve
+                                      </Button>
+                                    </div>
+                                  </div>
+                                  {approval.notes && (
+                                    <p className="mt-2 text-xs text-amber-700 bg-amber-50 p-2 rounded-lg">{approval.notes}</p>
+                                  )}
                                 </div>
                               ) : (
                                 <div className="mt-6 pt-6 border-t border-slate-100 flex items-center justify-between print:hidden">

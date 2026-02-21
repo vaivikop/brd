@@ -130,7 +130,7 @@ export class BRDActionExecutor implements ActionExecutor {
   private ai: GoogleGenAI;
   private project: ProjectState;
   private onProjectUpdate: (project: ProjectState) => void;
-  private modelId = 'gemini-2.5-flash';
+  private modelId = 'gemini-3-pro-preview';
 
   constructor(
     apiKey: string,

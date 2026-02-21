@@ -8,7 +8,7 @@ import InsightsReview from './InsightsReviewEnterprise';
 import BRDGenerationEnterprise from './BRDGenerationEnterprise';
 import BRDEdit from './BRDEdit';
 import GraphView from './GraphView';
-import ConflictDetection from './ConflictDetection';
+// import ConflictDetection from './ConflictDetection';
 import SentimentDashboard from './SentimentDashboard';
 import StatusReportView from './StatusReportView';
 import AgentPanel from './AgentPanel';
@@ -168,7 +168,7 @@ const DashboardLayout: React.FC = () => {
           </div>
         )}
 
-        <div className="animate-in fade-in slide-in-from-bottom-4 duration-500">
+        <div className="animate-in fade-in duration-500">
           
           {activeTab === 'dashboard' && (
             <ErrorBoundary>
@@ -238,6 +238,7 @@ const DashboardLayout: React.FC = () => {
               </ErrorBoundary>
           )}
 
+          {/* Conflict Detection page hidden for now
           {activeTab === 'conflicts' && (
               <ErrorBoundary>
                 <ConflictDetection 
@@ -248,6 +249,7 @@ const DashboardLayout: React.FC = () => {
                 />
               </ErrorBoundary>
           )}
+          */}
 
           {activeTab === 'sentiment' && (
               <ErrorBoundary>
@@ -282,7 +284,7 @@ const DashboardLayout: React.FC = () => {
         </div>
       </main>
 
-      {/* AI Agent Panel - Floating */}
+      {/* AI Agent Panel - Hidden for now
       {project && (
         <AgentPanel 
           project={project} 
@@ -292,6 +294,7 @@ const DashboardLayout: React.FC = () => {
           onNavigateToStatusReport={() => setActiveTab('status-report')}
         />
       )}
+      */}
     </div>
   );
 };

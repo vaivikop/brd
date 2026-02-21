@@ -10,7 +10,7 @@ import {
 const ai = new GoogleGenAI({ apiKey: import.meta.env.VITE_GEMINI_API_KEY });
 
 // Use the cheapest, fastest model
-const modelId = "gemini-2.5-flash";
+const modelId = "gemini-3-pro-preview";
 
 // ============================================================================
 // CACHING LAYER - Minimize API costs
@@ -173,27 +173,46 @@ export const generateInitialProjectAnalysis = async (
 
 export const generateBRD = async (
   project: { name: string; description?: string; goals?: string },
-  insights: Insight[]
+  insights: Insight[],
+  connectedSources?: { id: string; type: string; name: string; content?: string; fileType?: string }[]
 ): Promise<Omit<BRDSection, 'id'>[]> => {
   const approvedInsights = insights.filter(i => i.status === 'approved');
+  const sources = connectedSources || [];
   
-  // REQUIRE approved insights - no placeholder generation
-  if (approvedInsights.length === 0) {
-    throw new Error('Cannot generate BRD without approved insights. Please add data sources, extract insights, and approve them before generating the BRD.');
+  // REQUIRE approved insights or sources - no placeholder generation
+  if (approvedInsights.length === 0 && sources.length === 0) {
+    throw new Error('Cannot generate BRD without connected sources. Please add data sources, extract insights, and approve them before generating the BRD.');
   }
   
-  // Cache based on project and approved insight summaries
+  // Build connected sources summary
+  const sourcesByType = sources.reduce((acc, s) => {
+    const type = s.type || 'unknown';
+    if (!acc[type]) acc[type] = [];
+    acc[type].push(s.name);
+    return acc;
+  }, {} as Record<string, string[]>);
+  
+  const connectedSourcesSummary = Object.entries(sourcesByType)
+    .map(([type, names]) => `${type.toUpperCase()}: ${names.length}`)
+    .join(', ');
+  
+  // Cache based on project, sources, and approved insight summaries
   const insightSummaries = approvedInsights.map(i => i.summary).sort().join(',');
-  const cacheKey = getCacheKey('generateBRD', project.name, project.goals, insightSummaries.slice(0, 300));
+  const sourcesKey = sources.map(s => s.name).sort().join(',').slice(0, 100);
+  const cacheKey = getCacheKey('generateBRD', project.name, project.goals, sourcesKey, insightSummaries.slice(0, 300));
   const cached = getFromCache<Omit<BRDSection, 'id'>[]>(cacheKey);
   if (cached) return cached;
   
   const prompt = `
-    You are an expert Business Analyst AI. Generate a structured Business Requirements Document (BRD) based on the following project context and approved insights.
+    You are an expert Business Analyst AI. Generate a structured Business Requirements Document (BRD) based on the following project context, connected data sources, and approved insights.
     
     Project Name: ${project.name}
     Description: ${project.description || "Not specified"}
     Goals: ${project.goals || "Not specified"}
+    
+    Connected Data Sources (${sources.length} total): ${connectedSourcesSummary || 'None'}
+    ${sources.length > 0 ? sources.slice(0, 15).map(s => `- ${s.name} (${s.type})`).join('\n') : ''}
+    ${sources.length > 15 ? `... and ${sources.length - 15} more sources` : ''}
     
     Approved Insights (${approvedInsights.length} total):
     ${approvedInsights.map(i => `- [${i.category.toUpperCase()}] ${i.summary}: ${i.detail} (Source: ${i.source})`).join('\n')}
@@ -212,7 +231,33 @@ export const generateBRD = async (
     
     For EACH of the 8 sections, provide:
     - title: The exact section title as listed above
-    - content: Detailed content in Markdown format with bullet points, sub-headings where appropriate
+    - content: Professional, presentation-ready Markdown with these formatting standards:
+      
+      **Structure & Hierarchy:**
+      - Use ## for subsections, ### for sub-subsections
+      - Start each section with a brief overview paragraph
+      - Use --- horizontal rules to separate major topics
+      
+      **Visual Formatting:**
+      - Use **bold** for key terms, metrics, and important concepts
+      - Use *italics* for emphasis and technical terms
+      - Use \`code\` for system names and technical identifiers
+      - Use blockquotes (>) for executive highlights and key takeaways
+      
+      **Lists & Tables:**
+      - Use numbered lists for sequential/prioritized items
+      - Use bullet points for non-sequential items
+      - Use tables (| Col1 | Col2 |) for: stakeholder matrices, requirement priorities, metrics, timelines
+      
+      **Professional Callouts:**
+      - ⚠️ for risks/warnings
+      - ✅ for confirmed items
+      - 📋 for action items
+      - 💡 for recommendations
+      - 🎯 for objectives/targets
+      - 📊 for metrics/KPIs
+      - 🔗 for dependencies
+      
     - sources: An array of source names that contributed to this section (from the insights)
     - confidence: A confidence score (0-100) based on how well the insights support this section
     
@@ -271,7 +316,12 @@ export const refineBRD = async (
     
     For each section, provide:
     - title: The section title.
-    - content: The detailed content in Markdown format.
+    - content: Professional Markdown with:
+      - **Bold** for key terms and metrics
+      - *Italics* for emphasis
+      - Tables for structured data
+      - Numbered lists for priorities
+      - Callouts (⚠️ ✅ 💡 🎯 📊 🔗) for highlights
     - sources: An array of source names that contributed to this section.
     - confidence: A confidence score (0-100) for this section.
   `;

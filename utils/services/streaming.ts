@@ -3,9 +3,10 @@
 // ============================================================================
 
 import { GoogleGenAI, Type } from "@google/genai";
+import { safeJsonParse } from './ai';
 
 const ai = new GoogleGenAI({ apiKey: import.meta.env.VITE_GEMINI_API_KEY });
-const modelId = "gemini-2.5-flash";
+const modelId = "gemini-3-pro-preview";
 
 // Streaming callback types
 export type StreamCallback = (chunk: string, done: boolean) => void;
@@ -94,7 +95,7 @@ Return ONLY new conflicts found in this batch. Array format: [{type,severity,ins
 
       const text = response.text;
       if (text) {
-        const batchConflicts = JSON.parse(text) as StreamingConflict[];
+        const batchConflicts = safeJsonParse<StreamingConflict[]>(text, []);
         for (const conflict of batchConflicts) {
           onConflict(conflict, conflictIndex++);
         }
@@ -162,7 +163,7 @@ Return JSON array of stakeholder names and roles: [{name, role}]`;
       }
     });
 
-    const stakeholders = JSON.parse(stakeholderResponse.text || '[]') as { name: string; role?: string }[];
+    const stakeholders = safeJsonParse<{ name: string; role?: string }[]>(stakeholderResponse.text || '[]', []);
     
     onProgress(30, `Found ${stakeholders.length} stakeholders, analyzing sentiment...`);
 
@@ -223,7 +224,7 @@ Return JSON: {sentiment, score(-100 to 100), concerns[], supports[], quotes[{tex
           }
         });
 
-        const result = JSON.parse(sentimentResponse.text || '{}');
+        const result = safeJsonParse<any>(sentimentResponse.text || '{}', {});
         overallScore += result.score || 0;
         
         onStakeholder({
@@ -325,7 +326,7 @@ BRD: ${brdSections ? `${brdSections.length} sections, ${avgConfidence}% confiden
         }
       });
 
-      const result = JSON.parse(response.text || '{}');
+      const result = safeJsonParse<any>(response.text || '{}', {});
       onSection({ section, content: result });
     } catch (error) {
       console.error(`Error generating ${section}:`, error);

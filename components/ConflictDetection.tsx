@@ -106,6 +106,7 @@ const ConflictDetection: React.FC<ConflictDetectionProps> = ({
   const [isStreaming, setIsStreaming] = useState(false);
   const [streamingConflicts, setStreamingConflicts] = useState<RequirementConflict[]>([]);
   const abortStreamRef = useRef(false);
+  const streamingConflictsRef = useRef<RequirementConflict[]>([]);
   
   // === NEW: Conflict History / Audit Trail ===
   const [conflictHistory, setConflictHistory] = useState<ConflictHistoryEntry[]>([]);
@@ -136,24 +137,6 @@ const ConflictDetection: React.FC<ConflictDetectionProps> = ({
       }
     }
   }, [project]);
-
-  // Auto-detect conflicts when insights change (if enabled and not already analyzing)
-  const prevInsightHashRef = React.useRef(insightHash);
-  useEffect(() => {
-    if (
-      autoDetectEnabled &&
-      insightHash !== prevInsightHashRef.current &&
-      project.insights?.length >= 2 &&
-      !isAnalyzing
-    ) {
-      prevInsightHashRef.current = insightHash;
-      // Debounce auto-detection
-      const timer = setTimeout(() => {
-        handleStreamingAnalyze();
-      }, 2000); // Wait 2 seconds after changes
-      return () => clearTimeout(timer);
-    }
-  }, [insightHash, autoDetectEnabled, isAnalyzing]);
 
   // Load conflict history from project state
   useEffect(() => {
@@ -229,6 +212,7 @@ const ConflictDetection: React.FC<ConflictDetectionProps> = ({
     setIsAnalyzing(true);
     setError(null);
     setStreamingConflicts([]);
+    streamingConflictsRef.current = []; // Reset the ref
     setAnalysisProgress(0);
     setProgressMessage('Starting analysis...');
     abortStreamRef.current = false;
@@ -265,6 +249,8 @@ const ConflictDetection: React.FC<ConflictDetectionProps> = ({
               status: 'unresolved'
             };
             
+            // Update both state and ref
+            streamingConflictsRef.current = [...streamingConflictsRef.current, fullConflict];
             setStreamingConflicts(prev => [...prev, fullConflict]);
             
             // Add to history
@@ -289,17 +275,16 @@ const ConflictDetection: React.FC<ConflictDetectionProps> = ({
         }
       );
       
-      // Finalize conflicts
-      setConflicts(prev => {
-        const allConflicts = [...streamingConflicts];
-        // Save to project state
-        updateProjectContext({
-          ...project,
-          conflicts: allConflicts,
-          conflictsAnalyzedAt: new Date().toISOString()
-        } as any).then(onUpdate);
-        return allConflicts;
-      });
+      // Finalize conflicts - use ref to get the accumulated conflicts
+      const allConflicts = [...streamingConflictsRef.current];
+      setConflicts(allConflicts);
+      
+      // Save to project state
+      updateProjectContext({
+        ...project,
+        conflicts: allConflicts,
+        conflictsAnalyzedAt: new Date().toISOString()
+      } as any).then(onUpdate);
     } catch (err) {
       console.error('Streaming conflict detection failed:', err);
       setError('Analysis failed. Please try again.');
@@ -314,9 +299,27 @@ const ConflictDetection: React.FC<ConflictDetectionProps> = ({
     abortStreamRef.current = true;
     setIsStreaming(false);
     setIsAnalyzing(false);
-    // Keep any conflicts found so far
-    setConflicts(streamingConflicts);
-  }, [streamingConflicts]);
+    // Keep any conflicts found so far - use ref for current value
+    setConflicts(streamingConflictsRef.current);
+  }, []);
+
+  // Auto-detect conflicts when insights change (if enabled and not already analyzing)
+  const prevInsightHashRef = React.useRef(insightHash);
+  useEffect(() => {
+    if (
+      autoDetectEnabled &&
+      insightHash !== prevInsightHashRef.current &&
+      project.insights?.length >= 2 &&
+      !isAnalyzing
+    ) {
+      prevInsightHashRef.current = insightHash;
+      // Debounce auto-detection
+      const timer = setTimeout(() => {
+        handleStreamingAnalyze();
+      }, 2000); // Wait 2 seconds after changes
+      return () => clearTimeout(timer);
+    }
+  }, [insightHash, autoDetectEnabled, isAnalyzing, handleStreamingAnalyze]);
 
   const handleAnalyze = async () => {
     if (!project.insights || project.insights.length < 2) {

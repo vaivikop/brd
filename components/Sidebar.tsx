@@ -156,7 +156,7 @@ const Sidebar: React.FC<SidebarProps> = ({ activeTab, setActiveTab, collapsed = 
   ];
 
   const analysisMenuItems = [
-    { id: 'conflicts', label: 'Conflict Detection', icon: ShieldAlert },
+    // { id: 'conflicts', label: 'Conflict Detection', icon: ShieldAlert },
     { id: 'sentiment', label: 'Stakeholder Sentiment', icon: Heart },
     { id: 'status-report', label: 'Status Reports', icon: ClipboardList },
     { id: 'graph', label: 'Graph View', icon: Network },

@@ -1,5 +1,61 @@
 import { generateInitialProjectAnalysis, analyzeSource } from './services/ai';
 
+// ============================================================================
+// BRD CONTENT HASHING FOR DEDUPLICATION
+// ============================================================================
+
+/**
+ * Generate a content hash for a BRD to detect identical content
+ * This hash ignores metadata (version, generatedAt, timestamps) and focuses only on actual content
+ * Used to prevent duplicate BRDs in history when content is 100% identical
+ */
+export const generateBRDContentHash = (brd: { sections: BRDSection[]; generatedAt?: string; version?: number } | null | undefined): string => {
+  if (!brd || !brd.sections || brd.sections.length === 0) {
+    return 'empty';
+  }
+  
+  // Create a canonical representation of BRD content (ignoring metadata)
+  // Sort sections by title to ensure consistent ordering
+  const sortedSections = [...brd.sections].sort((a, b) => a.title.localeCompare(b.title));
+  
+  // Build content string from titles and content only (ignore ids, timestamps, etc.)
+  const contentString = sortedSections
+    .map(section => {
+      const normalizedTitle = section.title.toLowerCase().trim();
+      const normalizedContent = section.content
+        .toLowerCase()
+        .trim()
+        .replace(/\s+/g, ' '); // Normalize whitespace
+      const normalizedSources = (section.sources || [])
+        .map(s => s.toLowerCase().trim())
+        .sort()
+        .join('|');
+      return `${normalizedTitle}::${normalizedContent}::${normalizedSources}`;
+    })
+    .join('|||');
+  
+  // Generate hash using djb2 algorithm (same approach as generateSemanticHash)
+  let hash = 5381;
+  for (let i = 0; i < contentString.length; i++) {
+    const char = contentString.charCodeAt(i);
+    hash = ((hash << 5) + hash) + char;
+    hash = hash & hash; // Convert to 32-bit integer
+  }
+  
+  return hash.toString(36);
+};
+
+/**
+ * Check if two BRDs have identical content
+ * Returns true if the content is 100% the same (regardless of version/timestamp)
+ */
+export const areBRDsIdentical = (
+  brd1: { sections: BRDSection[]; generatedAt?: string; version?: number } | null | undefined,
+  brd2: { sections: BRDSection[]; generatedAt?: string; version?: number } | null | undefined
+): boolean => {
+  return generateBRDContentHash(brd1) === generateBRDContentHash(brd2);
+};
+
 const DB_NAME = 'ClarityAI_DB';
 const STORE_NAME = 'onboarding_store';
 const PROJECT_STORE = 'project_store';
@@ -152,6 +208,7 @@ export interface BRDSection {
 export interface ProjectState {
   id: string;
   name: string;
+  userName?: string;  // User's display name for personalization
   description?: string;
   timeline?: string;
   goals?: string;
@@ -179,6 +236,28 @@ export interface ProjectState {
     sections: BRDSection[];
     generatedAt: string;
     version: number;
+  }[];
+  // Conflict detection state
+  conflicts?: {
+    id: string;
+    type: 'contradiction' | 'ambiguity' | 'overlap' | 'dependency';
+    severity: 'critical' | 'major' | 'minor';
+    insight1: { id: string; summary: string; source: string };
+    insight2: { id: string; summary: string; source: string };
+    description: string;
+    suggestedResolution: string;
+    affectedBRDSections: string[];
+    detectedAt: string;
+    status: 'unresolved' | 'resolved' | 'deferred';
+  }[];
+  conflictsAnalyzedAt?: string;
+  conflictHistory?: {
+    id: string;
+    timestamp: string;
+    action: 'detected' | 'resolved' | 'deferred' | 'undo' | 'auto_resolved';
+    conflictId: string;
+    conflictDescription: string;
+    actionDetails?: string;
   }[];
 }
 
@@ -403,12 +482,41 @@ export const updateBRD = async (brd: ProjectState['brd'], markInsightsAsUsed: bo
     if (!project) throw new Error("No project found");
 
     const history = project.brdHistory || [];
+    
+    // ROBUST DEDUPLICATION: Check content hash, not just version number
+    // This ensures 100% identical BRDs are never duplicated regardless of version/timestamp
     if (project.brd) {
-        // Only add to history if this version is not already there (prevent duplicates)
-        const alreadyInHistory = history.some(h => h.version === project.brd!.version);
-        if (!alreadyInHistory) {
+        const currentBrdHash = generateBRDContentHash(project.brd);
+        const newBrdHash = generateBRDContentHash(brd);
+        
+        // Check if current BRD content already exists in history (by content hash)
+        const alreadyInHistoryByContent = history.some(h => generateBRDContentHash(h) === currentBrdHash);
+        
+        // Also check if the new BRD is identical to current (no need to create new version)
+        const isIdenticalToNew = currentBrdHash === newBrdHash;
+        
+        // Only add current BRD to history if:
+        // 1. It's not already in history (by content)
+        // 2. It's different from the new BRD being saved
+        if (!alreadyInHistoryByContent && !isIdenticalToNew) {
             history.push(project.brd);
         }
+        
+        // Also deduplicate existing history - remove any entries with identical content
+        // This prevents accumulation of duplicate history entries
+        const seenHashes = new Set<string>();
+        const deduplicatedHistory = history.filter(h => {
+            const hash = generateBRDContentHash(h);
+            if (seenHashes.has(hash)) {
+                return false; // Skip duplicate
+            }
+            seenHashes.add(hash);
+            return true;
+        });
+        
+        // Replace history with deduplicated version
+        history.length = 0;
+        history.push(...deduplicatedHistory);
     }
 
     // Extract all source names from BRD sections
@@ -761,6 +869,25 @@ export const addSourceToProject = async (source: Source): Promise<ProjectState> 
             timestamp: new Date().toISOString()
         }));
 
+        // Deduplicate insights by checking for similar summaries (prevents accumulation)
+        const existingInsights = currentProject.insights || [];
+        const uniqueNewInsights = newInsights.filter(newIns => {
+            const newSummaryLower = (newIns.summary || '').toLowerCase().trim();
+            // Check if a very similar insight already exists
+            return !existingInsights.some(existing => {
+                const existingSummaryLower = (existing.summary || '').toLowerCase().trim();
+                // Consider duplicate if summaries are identical or very similar
+                if (newSummaryLower === existingSummaryLower) return true;
+                // Check for high word overlap (>80%)
+                const newWords = new Set(newSummaryLower.split(/\s+/));
+                const existingWords = new Set(existingSummaryLower.split(/\s+/));
+                const intersection = [...newWords].filter(w => existingWords.has(w)).length;
+                const union = new Set([...newWords, ...existingWords]).size;
+                const similarity = union > 0 ? intersection / union : 0;
+                return similarity > 0.8;
+            });
+        });
+
         const updatedProject: ProjectState = {
             ...currentProject,
             completeness: Math.min(currentProject.completeness + (analysisResult.confidenceBoost || 5), 100),
@@ -771,7 +898,7 @@ export const addSourceToProject = async (source: Source): Promise<ProjectState> 
                 ...currentProject.recentActivity
             ],
             tasks: [...currentProject.tasks, ...newTasks],
-            insights: [...(currentProject.insights || []), ...newInsights]
+            insights: [...existingInsights, ...uniqueNewInsights]
         };
 
         const transaction = db.transaction(PROJECT_STORE, 'readwrite');
@@ -1051,4 +1178,140 @@ export const getTaskStats = (project: ProjectState | null) => {
             missing: tasks.filter(t => t.type === 'missing' && (t.status || 'pending') !== 'completed').length
         }
     };
+};
+
+// ============================================================================
+// AUTOMATIC INSIGHT EXTRACTION
+// ============================================================================
+
+export interface InsightExtractionProgress {
+    currentSource: number;
+    totalSources: number;
+    sourceName: string;
+    insightsExtracted: number;
+    status: 'idle' | 'running' | 'completed' | 'error';
+    error?: string;
+}
+
+/**
+ * Re-analyze all existing sources to extract insights.
+ * Useful for sources that were added before AI analysis was enabled,
+ * or to refresh insights with updated AI models.
+ */
+export const reanalyzeAllSources = async (
+    onProgress?: (progress: InsightExtractionProgress) => void
+): Promise<{ project: ProjectState; insightsGenerated: number; sourcesProcessed: number }> => {
+    const db = await initDB();
+    let project = await getProjectData();
+    if (!project) throw new Error("No project found");
+
+    const sources = project.sources || [];
+    if (sources.length === 0) {
+        return { project, insightsGenerated: 0, sourcesProcessed: 0 };
+    }
+
+    let totalInsightsGenerated = 0;
+    let sourcesProcessed = 0;
+
+    // Process each source sequentially to avoid API rate limits
+    for (let i = 0; i < sources.length; i++) {
+        const source = sources[i];
+        
+        // Report progress
+        onProgress?.({
+            currentSource: i + 1,
+            totalSources: sources.length,
+            sourceName: source.name,
+            insightsExtracted: totalInsightsGenerated,
+            status: 'running'
+        });
+
+        try {
+            // Only process sources with content
+            if (!source.content) {
+                continue;
+            }
+
+            // Analyze the source
+            const analysisResult = await analyzeSource(
+                source.name,
+                source.type,
+                { name: project.name, goals: project.goals },
+                source.content
+            );
+
+            // Refresh project state
+            project = await getProjectData();
+            if (!project) throw new Error("Project state lost during analysis");
+
+            const newInsights: Insight[] = analysisResult.insights.map((ins: any, idx: number) => ({
+                ...ins,
+                id: `ins_auto_${Date.now()}_${i}_${idx}`,
+                source: source.name,
+                sourceType: source.type,
+                timestamp: new Date().toISOString(),
+                status: 'pending'
+            }));
+
+            // Deduplicate against existing insights
+            const existingInsights = project.insights || [];
+            const uniqueNewInsights = newInsights.filter(newIns => {
+                const newSummaryLower = (newIns.summary || '').toLowerCase().trim();
+                return !existingInsights.some(existing => {
+                    const existingSummaryLower = (existing.summary || '').toLowerCase().trim();
+                    if (newSummaryLower === existingSummaryLower) return true;
+                    // Check for high word overlap (>80%)
+                    const newWords = new Set(newSummaryLower.split(/\s+/));
+                    const existingWords = new Set(existingSummaryLower.split(/\s+/));
+                    const intersection = [...newWords].filter(w => existingWords.has(w)).length;
+                    const union = new Set([...newWords, ...existingWords]).size;
+                    const similarity = union > 0 ? intersection / union : 0;
+                    return similarity > 0.8;
+                });
+            });
+
+            if (uniqueNewInsights.length > 0) {
+                const updatedProject: ProjectState = {
+                    ...project,
+                    insights: [...existingInsights, ...uniqueNewInsights],
+                    lastUpdated: new Date().toISOString(),
+                    recentActivity: [
+                        { id: `act_auto_${Date.now()}_${i}`, user: 'AI Agent', action: `Auto-extracted ${uniqueNewInsights.length} insights from ${source.name}`, time: 'Just now' },
+                        ...project.recentActivity
+                    ]
+                };
+
+                await new Promise((resolve, reject) => {
+                    const transaction = db.transaction(PROJECT_STORE, 'readwrite');
+                    const store = transaction.objectStore(PROJECT_STORE);
+                    const request = store.put(updatedProject);
+                    request.onsuccess = () => resolve(updatedProject);
+                    request.onerror = () => reject(request.error);
+                });
+
+                totalInsightsGenerated += uniqueNewInsights.length;
+                project = updatedProject;
+            }
+
+            sourcesProcessed++;
+
+            // Small delay to avoid rate limiting
+            await new Promise(resolve => setTimeout(resolve, 100));
+
+        } catch (error: any) {
+            console.error(`Failed to analyze source ${source.name}:`, error);
+            // Continue with other sources
+        }
+    }
+
+    // Final progress update
+    onProgress?.({
+        currentSource: sources.length,
+        totalSources: sources.length,
+        sourceName: '',
+        insightsExtracted: totalInsightsGenerated,
+        status: 'completed'
+    });
+
+    return { project, insightsGenerated: totalInsightsGenerated, sourcesProcessed };
 };
