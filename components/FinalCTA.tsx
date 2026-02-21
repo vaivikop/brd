@@ -86,7 +86,7 @@ const FinalCTA: React.FC = () => {
           <div className="flex flex-col sm:flex-row gap-4 justify-center mb-10">
             <Button 
               size="lg" 
-              className="group gap-3 px-10 h-16 text-lg bg-white text-blue-600 hover:bg-blue-50 shadow-2xl shadow-black/20 hover:shadow-black/30 hover:scale-105 transition-all duration-300"
+              className="group gap-3 px-10 h-16 text-lg bg-white text-black hover:bg-blue-50 shadow-2xl shadow-black/20 hover:shadow-black/30 hover:scale-105 transition-all duration-300"
               onClick={() => navigateTo('onboarding')}
             >
               Get Started Free
@@ -95,7 +95,7 @@ const FinalCTA: React.FC = () => {
             <Button 
               variant="outline" 
               size="lg" 
-              className="gap-3 px-10 h-16 text-lg border-2 border-white/30 text-white hover:bg-white/10 backdrop-blur-sm"
+              className="gap-3 px-10 h-16 text-lg border-2 border-white/30 text-black bg-white/90 hover:bg-white backdrop-blur-sm"
             >
               Watch Demo
             </Button>

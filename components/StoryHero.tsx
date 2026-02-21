@@ -590,11 +590,8 @@ const StoryHero: React.FC = () => {
 
       {/* Scroll indicator */}
       <div className="absolute bottom-8 left-1/2 -translate-x-1/2 animate-bounce hidden sm:block">
-        <div className="flex flex-col items-center gap-2">
-          <span className="text-xs text-slate-400 font-medium">Scroll to explore</span>
-          <div className="w-6 h-10 rounded-full border-2 border-slate-300 flex items-start justify-center p-2">
-            <div className="w-1.5 h-3 bg-slate-400 rounded-full animate-scroll-indicator" />
-          </div>
+        <div className="w-6 h-10 rounded-full border-2 border-slate-300 flex items-start justify-center p-2">
+          <div className="w-1.5 h-3 bg-slate-400 rounded-full animate-scroll-indicator" />
         </div>
       </div>
     </section>
