@@ -166,17 +166,8 @@ export const generateInitialProjectAnalysis = async (
     return result;
   } catch (error) {
     console.error("AI Analysis Failed:", error);
-    // Fallback data
-    return {
-      completeness: 10,
-      stakeholderCoverage: 5,
-      overallConfidence: 20,
-      summary: "Project initialized. Awaiting data sources.",
-      tasks: [
-        { title: "Connect first data source", type: "missing", urgency: "high", confidence: 100, status: 'pending', createdAt: new Date().toISOString() },
-        { title: "Define stakeholder list", type: "missing", urgency: "medium", confidence: 100, status: 'pending', createdAt: new Date().toISOString() }
-      ]
-    };
+    // Do not return fake fallback data - throw error for proper handling
+    throw new Error(`Failed to generate project analysis: ${error instanceof Error ? error.message : 'Unknown error'}. Please check your API key and try again.`);
   }
 };
 
@@ -185,6 +176,11 @@ export const generateBRD = async (
   insights: Insight[]
 ): Promise<Omit<BRDSection, 'id'>[]> => {
   const approvedInsights = insights.filter(i => i.status === 'approved');
+  
+  // REQUIRE approved insights - no placeholder generation
+  if (approvedInsights.length === 0) {
+    throw new Error('Cannot generate BRD without approved insights. Please add data sources, extract insights, and approve them before generating the BRD.');
+  }
   
   // Cache based on project and approved insight summaries
   const insightSummaries = approvedInsights.map(i => i.summary).sort().join(',');
@@ -199,10 +195,11 @@ export const generateBRD = async (
     Description: ${project.description || "Not specified"}
     Goals: ${project.goals || "Not specified"}
     
-    Approved Insights:
-    ${approvedInsights.length > 0 ? approvedInsights.map(i => `- [${i.category.toUpperCase()}] ${i.summary}: ${i.detail} (Source: ${i.source})`).join('\n') : '- No approved insights yet. Generate placeholder content based on project context.'}
+    Approved Insights (${approvedInsights.length} total):
+    ${approvedInsights.map(i => `- [${i.category.toUpperCase()}] ${i.summary}: ${i.detail} (Source: ${i.source})`).join('\n')}
     
-    IMPORTANT: You MUST generate EXACTLY 8 sections in the following order. Do not combine or skip any sections:
+    IMPORTANT: Generate content ONLY based on the provided approved insights. Do not invent or assume information not present in the insights.
+    You MUST generate EXACTLY 8 sections in the following order. Do not combine or skip any sections:
     
     1. "Executive Summary" - High-level overview of the project, its purpose, and key outcomes
     2. "Business Objectives" - Specific, measurable goals the project aims to achieve
@@ -397,15 +394,18 @@ export const analyzeSource = async (
   projectContext?: { name: string; goals?: string },
   sourceContent?: string
 ): Promise<{ tasks: Omit<Task, 'id'>[]; insights: Omit<Insight, 'id' | 'timestamp'>[]; confidenceBoost: number }> => {
-  // Check cache - use content hash for cache key if content exists
-  const contentHash = sourceContent ? sourceContent.slice(0, 200) : '';
+  // REQUIRE actual content - no simulation mode
+  if (!sourceContent || sourceContent.trim().length < 50) {
+    throw new Error(`Cannot analyze source "${sourceName}" - no content provided. Please provide actual document content for real analysis.`);
+  }
+
+  // Check cache - use content hash for cache key
+  const contentHash = sourceContent.slice(0, 200);
   const cacheKey = getCacheKey('analyzeSource', sourceName, sourceType, projectContext?.name, contentHash);
   const cached = getFromCache<{ tasks: Omit<Task, 'id'>[]; insights: Omit<Insight, 'id' | 'timestamp'>[]; confidenceBoost: number }>(cacheKey);
   if (cached) return cached;
 
-  const contentSection = sourceContent 
-    ? `\n--- DOCUMENT CONTENT (first 10000 chars) ---\n${sourceContent.slice(0, 10000)}\n--- END CONTENT ---`
-    : '';
+  const contentSection = `\n--- DOCUMENT CONTENT (first 10000 chars) ---\n${sourceContent.slice(0, 10000)}\n--- END CONTENT ---`;
     
   const prompt = `
     You are an expert Business Analyst AI. A new data source has been added to the project.
@@ -415,12 +415,14 @@ export const analyzeSource = async (
     Source Type: ${sourceType}
     ${contentSection}
 
-    ${sourceContent ? 'Analyze the provided document content and extract:' : 'Simulate the analysis of this source and:'}
-    1. Generate 2-3 realistic tasks/insights that ${sourceContent ? 'are extracted from' : 'might come from'} this ${sourceContent ? 'document' : 'type of source'}.
-    2. Generate 2-3 specific "Insights" (Requirements, Decisions, Stakeholders, Timelines, or Questions).
+    Analyze the provided document content and extract ONLY information that is explicitly stated or can be directly inferred from the content:
+    1. Generate 2-3 tasks/insights that are extracted from this document. Only include items you can trace back to specific content.
+    2. Generate 2-3 specific "Insights" (Requirements, Decisions, Stakeholders, Timelines, or Questions) that are supported by the document.
        - Category: 'requirement', 'decision', 'stakeholder', 'timeline', 'question'
-       - Confidence: 'high', 'medium', 'low'
-    3. Estimate confidence boost (1-15%).
+       - Confidence: 'high' only if explicitly stated, 'medium' if inferred, 'low' if uncertain
+    3. Estimate confidence boost (1-15%) based on how much valuable information the document contains.
+
+    IMPORTANT: Do not invent or assume information. Only extract what is actually present in the content.
 
     Return JSON.
   `;
@@ -491,23 +493,8 @@ export const analyzeSource = async (
 
   } catch (error) {
     console.error("AI Source Analysis Failed:", error);
-    return {
-      tasks: [
-        { title: `Review ${sourceName}`, type: 'ambiguity', urgency: 'medium', source: sourceName, confidence: 50, status: 'pending', createdAt: new Date().toISOString() }
-      ],
-      insights: [
-        { 
-          category: 'question', 
-          summary: `Verify content of ${sourceName}`, 
-          detail: 'AI analysis failed or source is empty. Manual review required.', 
-          confidence: 'low',
-          source: sourceName,
-          sourceType: sourceType as any,
-          status: 'pending'
-        }
-      ],
-      confidenceBoost: 5
-    };
+    // Do not return fake/placeholder data - propagate the error for proper handling
+    throw new Error(`Failed to analyze source "${sourceName}": ${error instanceof Error ? error.message : 'Unknown error'}. Please ensure the source contains valid content and try again.`);
   }
 };
 

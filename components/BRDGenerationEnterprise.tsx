@@ -346,11 +346,17 @@ const BRDGenerationEnterprise: React.FC<BRDGenerationEnterpriseProps> = ({
   // Compare state (for diff view)
   const [compareVersion, setCompareVersion] = useState<number | null>(null);
   
+  // Preview state (for viewing old versions without modifying)
+  const [previewVersion, setPreviewVersion] = useState<any | null>(null);
+  
   // Refs
   const documentRef = useRef<HTMLDivElement>(null);
   const sectionRefs = useRef<{ [key: string]: HTMLElement | null }>({});
   
   const brd = project.brd;
+  // Use preview version if set, otherwise use current BRD
+  const displayBrd = previewVersion || brd;
+  const isPreviewMode = !!previewVersion;
   const projectStats = useMemo(() => getProjectStats(project), [project]);
   
   // ========== COMPUTED VALUES ==========
@@ -755,14 +761,15 @@ const BRDGenerationEnterprise: React.FC<BRDGenerationEnterpriseProps> = ({
     }
   };
   
-  const handleRestoreVersion = async (version: any) => {
+  const handleRestoreVersion = (version: any) => {
     if (!version) return;
-    // Just show the version without creating a new version
-    const updated = await updateBRD({
-      ...version
-    });
-    onUpdate(updated);
+    // Just preview the version without modifying anything
+    setPreviewVersion(version);
     setShowHistory(false);
+  };
+  
+  const exitPreviewMode = () => {
+    setPreviewVersion(null);
   };
   
   const handleShare = () => {
@@ -1170,7 +1177,7 @@ const BRDGenerationEnterprise: React.FC<BRDGenerationEnterpriseProps> = ({
                   </button>
                 </div>
                 <nav className="space-y-2">
-                  {brd?.sections.map((section, i) => {
+                  {displayBrd?.sections.map((section, i) => {
                     const conf = confidenceMap[section.id] || 0;
                     const confColor = getConfidenceColor(conf);
                     return (
@@ -1384,7 +1391,7 @@ const BRDGenerationEnterprise: React.FC<BRDGenerationEnterpriseProps> = ({
                       </button>
                     </div>
                     <nav className="space-y-1">
-                      {brd?.sections.map((section, i) => {
+                      {displayBrd?.sections.map((section, i) => {
                         const approval = approvals.find(a => a.sectionId === section.id);
                         return (
                           <button
@@ -1546,17 +1553,40 @@ const BRDGenerationEnterprise: React.FC<BRDGenerationEnterpriseProps> = ({
               </div>
             )}
             
+            {/* Preview Mode Banner */}
+            {isPreviewMode && (
+              <div className="sticky top-0 z-10 bg-amber-50 border-b border-amber-200 px-6 lg:px-12 xl:px-20 py-4 shadow-sm">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-4">
+                    <Eye className="h-5 w-5 text-amber-600" />
+                    <span className="font-bold text-amber-900">Viewing Version {previewVersion?.version}.0</span>
+                    <span className="text-sm text-amber-700">
+                      Generated on {new Date(previewVersion?.generatedAt).toLocaleString()}
+                    </span>
+                  </div>
+                  <Button 
+                    variant="outline" 
+                    size="sm"
+                    onClick={exitPreviewMode}
+                    className="border-amber-300 text-amber-700 hover:bg-amber-100"
+                  >
+                    <X className="h-4 w-4 mr-1" /> Exit Preview
+                  </Button>
+                </div>
+              </div>
+            )}
+            
             <div className="max-w-none px-6 lg:px-12 xl:px-20 py-8 print:max-w-none print:p-0">
               {/* Print Header */}
               <div className="hidden print:block mb-10 border-b-2 border-slate-900 pb-8">
                 <h1 className="text-4xl font-bold mb-2">Business Requirements Document</h1>
                 <p className="text-lg text-slate-600">Project: {project.name}</p>
-                <p className="text-sm text-slate-400">Version {brd?.version}.0 • Generated on {new Date(brd!.generatedAt).toLocaleString()}</p>
+                <p className="text-sm text-slate-400">Version {displayBrd?.version}.0 • Generated on {new Date(displayBrd!.generatedAt).toLocaleString()}</p>
               </div>
 
               {/* BRD Sections */}
               <div className="space-y-6 print:space-y-12">
-                {brd?.sections.map((section, index) => {
+                {displayBrd?.sections.map((section, index) => {
                   const conf = confidenceMap[section.id] || 0;
                   const confColor = getConfidenceColor(conf);
                   const approval = approvals.find(a => a.sectionId === section.id);
@@ -1635,7 +1665,19 @@ const BRDGenerationEnterprise: React.FC<BRDGenerationEnterpriseProps> = ({
                           
                           {/* Section Actions */}
                           <div className="flex items-center gap-1 shrink-0 print:hidden">
-                            {isRegenerating ? (
+                            {isPreviewMode ? (
+                              <>
+                                <span className="text-xs text-amber-600 font-medium px-2 py-1 bg-amber-50 rounded-lg">
+                                  Preview Only
+                                </span>
+                                <button 
+                                  onClick={() => toggleSection(section.id)}
+                                  className="p-2 text-slate-400 hover:bg-slate-100 rounded-lg transition-colors"
+                                >
+                                  {expandedSections.includes(section.id) ? <ChevronUp className="h-4 w-4" /> : <ChevronDown className="h-4 w-4" />}
+                                </button>
+                              </>
+                            ) : isRegenerating ? (
                               <div className="px-3 py-2 text-blue-600">
                                 <Loader className="h-4 w-4 animate-spin" />
                               </div>
@@ -1835,8 +1877,8 @@ const BRDGenerationEnterprise: React.FC<BRDGenerationEnterpriseProps> = ({
                                 </div>
                               )}
                               
-                              {/* Approval Actions - Only show if not approved */}
-                              {approval?.status === 'approved' ? (
+                              {/* Approval Actions - Only show if not approved and not in preview mode */}
+                              {!isPreviewMode && (approval?.status === 'approved' ? (
                                 <div className="mt-6 pt-6 border-t border-slate-100 print:hidden">
                                   <div className="flex items-center gap-2 text-emerald-600">
                                     <CheckCircle2 className="h-4 w-4" />
@@ -1867,7 +1909,7 @@ const BRDGenerationEnterprise: React.FC<BRDGenerationEnterpriseProps> = ({
                                     </Button>
                                   </div>
                                 </div>
-                              )}
+                              ))}
                             </div>
                           </motion.div>
                         )}
@@ -2133,7 +2175,7 @@ const BRDGenerationEnterprise: React.FC<BRDGenerationEnterpriseProps> = ({
               ) : (
                 /* Table of Contents */
                 <nav className="space-y-1">
-                  {brd?.sections.map((section, i) => {
+                  {displayBrd?.sections.map((section, i) => {
                     const conf = confidenceMap[section.id] || 0;
                     const approval = approvals.find(a => a.sectionId === section.id);
                     const sectionComments = comments.filter(c => c.sectionId === section.id && !c.resolved);
@@ -2362,7 +2404,11 @@ const BRDGenerationEnterprise: React.FC<BRDGenerationEnterpriseProps> = ({
                         <Button 
                           variant="outline" 
                           size="sm"
-                          onClick={() => setCompareVersion(version.version)}
+                          onClick={() => {
+                            setCompareVersion(version.version);
+                            handleSetViewMode('compare');
+                            setShowHistory(false);
+                          }}
                           className="rounded-xl opacity-0 group-hover:opacity-100 transition-opacity"
                         >
                           <GitCompare className="h-4 w-4 mr-1" /> Compare

@@ -47,7 +47,7 @@ const ConfidenceEngine: React.FC = () => {
             </Button>
           </div>
 
-          {/* Right Interactive Demo */}
+          {/* Right Interactive Example */}
           <div className="relative">
             <div className="absolute inset-0 bg-gradient-to-tr from-orange-50 to-blue-50 rounded-3xl -rotate-2 transform scale-105 -z-10"></div>
             
@@ -89,7 +89,7 @@ const ConfidenceEngine: React.FC = () => {
 
                 {!isResolved && (
                   <div className="pt-4 animate-in fade-in slide-in-from-bottom-4 duration-500">
-                    <p className="text-xs text-slate-500 mb-3 text-center">Simulate Stakeholder Clarification:</p>
+                    <p className="text-xs text-slate-500 mb-3 text-center">See how the AI Agent resolves conflicts:</p>
                     <button 
                       onClick={() => setIsResolved(true)}
                       className="w-full py-3 bg-slate-900 hover:bg-slate-800 text-white rounded-lg text-sm font-medium flex items-center justify-center gap-2 transition-all"
@@ -105,7 +105,7 @@ const ConfidenceEngine: React.FC = () => {
                       onClick={() => setIsResolved(false)}
                       className="w-full py-3 border border-slate-200 text-slate-600 hover:bg-slate-50 rounded-lg text-sm font-medium flex items-center justify-center gap-2 transition-all"
                     >
-                      Reset Demo
+                      Reset Example
                     </button>
                   </div>
                 )}

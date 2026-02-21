@@ -308,14 +308,16 @@ export class DatasetLoader {
       // Parse uploaded file
       rawData = await this.parseCSVFile(fromFile);
     } else {
-      // Try to load from public folder
+      // Try to load from public folder - require actual data, no demo fallback
       try {
         const response = await fetch(`${this.baseUrl}/datasets/enron/emails_sample.json`);
-        if (!response.ok) throw new Error('Sample not found');
+        if (!response.ok) throw new Error('No Enron dataset found');
         rawData = await response.json();
-      } catch {
-        // Return sample data for demo
-        rawData = this.getEnronSampleData();
+        if (!rawData || rawData.length === 0) {
+          throw new Error('Dataset is empty');
+        }
+      } catch (error) {
+        throw new Error('Enron email dataset not available. Please upload your own email data file (CSV or JSON format).');
       }
     }
 
@@ -399,10 +401,13 @@ export class DatasetLoader {
     } else {
       try {
         const response = await fetch(`${this.baseUrl}/datasets/ami/meetings_sample.json`);
-        if (!response.ok) throw new Error('Sample not found');
+        if (!response.ok) throw new Error('No AMI dataset found');
         rawData = await response.json();
-      } catch {
-        rawData = this.getAMISampleData();
+        if (!rawData || rawData.length === 0) {
+          throw new Error('Dataset is empty');
+        }
+      } catch (error) {
+        throw new Error('AMI meeting dataset not available. Please upload your own meeting data file (JSON format).');
       }
     }
 
@@ -432,10 +437,13 @@ export class DatasetLoader {
     } else {
       try {
         const response = await fetch(`${this.baseUrl}/datasets/transcripts/sample.json`);
-        if (!response.ok) throw new Error('Sample not found');
+        if (!response.ok) throw new Error('No transcripts dataset found');
         rawData = await response.json();
-      } catch {
-        rawData = this.getMeetingTranscriptsSampleData();
+        if (!rawData || rawData.length === 0) {
+          throw new Error('Dataset is empty');
+        }
+      } catch (error) {
+        throw new Error('Meeting transcripts dataset not available. Please upload your own transcript data file (JSON format).');
       }
     }
 
@@ -747,316 +755,6 @@ export class DatasetLoader {
     if (email.to.length + email.cc.length > 3) score += 0.1;
     
     return Math.max(0, Math.min(1, score));
-  }
-
-  // ============================================================================
-  // SAMPLE DATA FOR DEMO/TESTING
-  // ============================================================================
-
-  private static getEnronSampleData(): any[] {
-    return [
-      {
-        message: `Message-ID: <001@enron.com>
-Date: Mon, 15 Oct 2001 09:30:00 -0700
-From: john.smith@enron.com
-To: team@enron.com, stakeholders@enron.com
-Cc: management@enron.com
-Subject: Project Falcon - Requirements Review Meeting
-
-Team,
-
-Following our kickoff meeting last week, I wanted to summarize the key requirements we've identified:
-
-1. FUNCTIONAL REQUIREMENTS:
-   - System must handle 10,000 concurrent users
-   - Real-time data synchronization across all regions
-   - Integration with existing SAP and Oracle systems
-   - Mobile access for field operations team
-
-2. NON-FUNCTIONAL REQUIREMENTS:
-   - 99.9% uptime SLA
-   - Response time under 2 seconds for all queries
-   - SOX compliance for all financial modules
-
-3. TIMELINE:
-   - Phase 1 completion: December 15, 2001
-   - UAT begins: January 5, 2002
-   - Go-live target: February 1, 2002
-
-Please review and confirm these requirements by EOD Wednesday. We need stakeholder approval before proceeding to design phase.
-
-Action Items:
-- Sarah: Validate technical feasibility with IT
-- Mike: Get budget approval from finance
-- Lisa: Schedule follow-up with legal for compliance review
-
-Best regards,
-John Smith
-Project Manager`
-      },
-      {
-        message: `Message-ID: <002@enron.com>
-Date: Tue, 16 Oct 2001 14:15:00 -0700
-From: sarah.jones@enron.com
-To: john.smith@enron.com
-Cc: team@enron.com
-Subject: RE: Project Falcon - Requirements Review Meeting
-
-John,
-
-I've reviewed the requirements with the IT team. Here are our findings:
-
-APPROVED:
-- 10,000 concurrent users is achievable with our current infrastructure
-- SAP integration is straightforward using existing APIs
-
-CONCERNS:
-- Oracle integration will require custom middleware - estimated 3 weeks additional development
-- Real-time sync may need to be "near real-time" (30-second refresh) due to network latency constraints
-
-DECISION NEEDED:
-Should we proceed with near real-time sync or invest in dedicated fiber connection? The fiber option adds $150K to budget but ensures true real-time capability.
-
-Recommending we discuss this in tomorrow's standup.
-
-Sarah
-Technical Lead`
-      },
-      {
-        message: `Message-ID: <003@enron.com>
-Date: Wed, 17 Oct 2001 10:00:00 -0700
-From: mike.wilson@enron.com
-To: john.smith@enron.com, sarah.jones@enron.com
-Cc: finance@enron.com
-Subject: RE: Project Falcon - Budget Approval
-
-Team,
-
-Finance has approved the Project Falcon budget with the following conditions:
-
-APPROVED BUDGET: $2.4M
-- Development: $1.2M
-- Infrastructure: $600K
-- Contingency: $300K
-- Training & Documentation: $300K
-
-DECISION: We're approving the fiber connection option that Sarah mentioned. The $150K is covered under contingency.
-
-DEADLINE: All procurement requests must be submitted by October 25th to ensure December delivery timeline.
-
-One requirement change from executive sponsor:
-- Adding requirement for executive dashboard with KPI visualization
-- This is P1 priority for CEO visibility
-
-Please update the requirements document and circulate for final sign-off.
-
-Mike Wilson
-Finance Director`
-      },
-      {
-        message: `Message-ID: <004@enron.com>
-Date: Thu, 18 Oct 2001 16:45:00 -0700
-From: lisa.chen@enron.com
-To: project-falcon@enron.com
-Subject: Legal Review Complete - Compliance Requirements Added
-
-All,
-
-Legal has completed review. Adding the following compliance requirements:
-
-MANDATORY REQUIREMENTS:
-1. All user actions must be logged with timestamp and user ID
-2. Data retention policy: 7 years for financial records
-3. User access must be role-based with quarterly access reviews
-4. Encryption required for data at rest and in transit (AES-256 minimum)
-
-STAKEHOLDER APPROVAL NEEDED:
-- These requirements may impact the timeline
-- Audit logging could affect performance - need Sarah's assessment
-- Recommend adding 2 weeks to Phase 1 for compliance testing
-
-Decision meeting scheduled for Friday 10 AM. Please confirm attendance.
-
-Lisa Chen
-Legal Counsel`
-      },
-      {
-        message: `Message-ID: <005@enron.com>
-Date: Fri, 19 Oct 2001 11:30:00 -0700
-From: john.smith@enron.com
-To: project-falcon@enron.com, executives@enron.com
-Subject: Project Falcon - Final Requirements Sign-off
-
-Team and Stakeholders,
-
-Following today's meeting, I'm pleased to confirm the following decisions:
-
-APPROVED CHANGES:
-✓ Real-time sync via dedicated fiber connection - APPROVED
-✓ Executive KPI dashboard - ADDED to scope
-✓ Full compliance requirements per legal - ACCEPTED
-✓ Timeline extended by 2 weeks - APPROVED
-
-FINAL TIMELINE:
-- Phase 1: December 31, 2001
-- UAT: January 15, 2002
-- Go-live: February 15, 2002
-
-BUDGET: $2.55M (final)
-
-All stakeholders have signed off. Requirements document v2.0 is attached and locked.
-
-Next milestone: Design review - November 1, 2001
-
-Thank you all for your collaboration.
-
-Best,
-John Smith
-Project Manager, Project Falcon`
-      }
-    ];
-  }
-
-  private static getAMISampleData(): any[] {
-    return [
-      {
-        meeting_id: 'ES2008a',
-        scenario: 'Product Design - Remote Control Project',
-        duration: '35:20',
-        participants: [
-          { role: 'Project Manager', speakerId: 'PM' },
-          { role: 'Industrial Designer', speakerId: 'ID' },
-          { role: 'User Interface Designer', speakerId: 'UI' },
-          { role: 'Marketing Expert', speakerId: 'ME' }
-        ],
-        transcript: [
-          { speaker: 'PM', role: 'Project Manager', timestamp: '00:00:15', text: "Okay, let's get started with our kickoff meeting for the new remote control project. The goal is to design a remote that's both innovative and user-friendly." },
-          { speaker: 'ME', role: 'Marketing Expert', timestamp: '00:01:22', text: "From our market research, users are frustrated with having too many buttons. They want something simple but powerful. Price point should be under twenty-five euros for mass market appeal." },
-          { speaker: 'ID', role: 'Industrial Designer', timestamp: '00:02:45', text: "I'm thinking we should explore ergonomic designs. Maybe a curved shape that fits naturally in the hand. We could reduce buttons by using a scroll wheel or touch surface." },
-          { speaker: 'UI', role: 'User Interface Designer', timestamp: '00:03:58', text: "For the interface, I'd suggest we prioritize the most-used functions. Channel, volume, and power should be immediately accessible. Everything else can be in a menu." },
-          { speaker: 'PM', role: 'Project Manager', timestamp: '00:05:12', text: "Good points. So our requirements are: ergonomic design, simplified button layout, intuitive interface, and manufacturing cost under twelve euros. Does everyone agree?" },
-          { speaker: 'ME', role: 'Marketing Expert', timestamp: '00:06:30', text: "Yes, and I'd add that the design should appeal to younger demographics. Maybe we can incorporate customizable colors or interchangeable covers." },
-          { speaker: 'ID', role: 'Industrial Designer', timestamp: '00:07:45', text: "The interchangeable cover is feasible. It would also make manufacturing easier since we can produce one base unit with multiple cover options." },
-          { speaker: 'PM', role: 'Project Manager', timestamp: '00:09:00', text: "Excellent. Let me document these decisions. Action items: Industrial Designer will create three concept sketches by next meeting. UI Designer will prototype the button layout. Marketing will finalize target demographic profile." }
-        ],
-        summary: {
-          abstractive: "The team held a kickoff meeting for a new remote control project. They established key requirements: ergonomic design, simplified button interface, price point under €25 retail (€12 manufacturing), and appeal to younger demographics. The team decided to explore interchangeable covers for customization. Action items were assigned for concept sketches, UI prototypes, and demographic research.",
-          extractive: [
-            "Users want something simple but powerful",
-            "Price point should be under twenty-five euros",
-            "Ergonomic curved shape that fits naturally in the hand",
-            "Channel, volume, and power should be immediately accessible",
-            "Design should appeal to younger demographics"
-          ],
-          decisions: [
-            "Manufacturing cost target: under €12",
-            "Will explore interchangeable cover design",
-            "Most-used functions will be prioritized on interface"
-          ],
-          actionItems: [
-            "Industrial Designer: Create three concept sketches",
-            "UI Designer: Prototype button layout",
-            "Marketing: Finalize target demographic profile"
-          ]
-        }
-      },
-      {
-        meeting_id: 'ES2008b',
-        scenario: 'Product Design - Remote Control - Design Review',
-        duration: '28:45',
-        participants: [
-          { role: 'Project Manager', speakerId: 'PM' },
-          { role: 'Industrial Designer', speakerId: 'ID' },
-          { role: 'User Interface Designer', speakerId: 'UI' },
-          { role: 'Marketing Expert', speakerId: 'ME' }
-        ],
-        transcript: [
-          { speaker: 'PM', role: 'Project Manager', timestamp: '00:00:20', text: "Welcome back everyone. Today we're reviewing the concept designs. Industrial Designer, would you like to present your sketches?" },
-          { speaker: 'ID', role: 'Industrial Designer', timestamp: '00:01:15', text: "Sure. I've created three concepts. Option A is a traditional rectangle with rounded edges. Option B is an egg-shaped design that's very ergonomic. Option C is a more futuristic triangular shape." },
-          { speaker: 'ME', role: 'Marketing Expert', timestamp: '00:03:40', text: "Option B looks great for comfort, but Option C would really stand out on store shelves. Could we combine elements? Maybe the ergonomics of B with the distinctive look of C?" },
-          { speaker: 'UI', role: 'User Interface Designer', timestamp: '00:05:22', text: "For the button layout, I recommend Option B. The curved surface gives us better placement for a central navigation pad. The triangular design limits where we can put buttons." },
-          { speaker: 'ID', role: 'Industrial Designer', timestamp: '00:07:00', text: "Combining B and C is possible. We could do an asymmetrical curved design with one pointed end. It would be unique and ergonomic." },
-          { speaker: 'PM', role: 'Project Manager', timestamp: '00:08:45', text: "Let's vote. The hybrid design seems to have consensus. Are we all in agreement?" },
-          { speaker: 'ME', role: 'Marketing Expert', timestamp: '00:09:30', text: "Agreed. But we need to ensure the manufacturing cost stays within budget. Can we get a cost estimate?" },
-          { speaker: 'ID', role: 'Industrial Designer', timestamp: '00:10:15', text: "I'll need to consult with production. Initial estimate is around ten euros for the base unit, leaving room for the interchangeable covers." },
-          { speaker: 'PM', role: 'Project Manager', timestamp: '00:11:30', text: "Decision made: We're proceeding with the hybrid design. Next steps: ID will create detailed CAD models, UI will finalize button placement, Marketing will test the design concept with focus groups." }
-        ],
-        summary: {
-          abstractive: "The team reviewed three concept designs for the remote control. After discussion, they decided on a hybrid approach combining the ergonomic qualities of the egg-shaped design with distinctive features of the triangular concept. Manufacturing cost is estimated at €10 for the base unit. Next steps include CAD modeling, button placement finalization, and focus group testing.",
-          extractive: [
-            "Option B is very ergonomic",
-            "Option C would stand out on store shelves",
-            "Combining B and C: asymmetrical curved design with one pointed end",
-            "Manufacturing cost around ten euros for base unit"
-          ],
-          decisions: [
-            "Proceeding with hybrid design concept",
-            "Base unit cost: €10 estimated",
-            "Will conduct focus group testing"
-          ],
-          actionItems: [
-            "Industrial Designer: Create detailed CAD models",
-            "UI Designer: Finalize button placement",
-            "Marketing: Conduct focus group testing"
-          ]
-        }
-      }
-    ];
-  }
-
-  private static getMeetingTranscriptsSampleData(): any[] {
-    return [
-      {
-        title: "Sprint Planning - Q4 Features",
-        date: "2024-10-01T10:00:00Z",
-        participants: ["Product Owner", "Scrum Master", "Dev Team Lead", "QA Lead"],
-        transcript: `Product Owner: Let's prioritize the Q4 backlog. Our main goals are improving user onboarding and reducing churn.
-
-Scrum Master: We have capacity for about 40 story points this sprint. What are the top priorities?
-
-Product Owner: The new onboarding wizard is P1. Users are dropping off at step 3 of the current flow. We need to simplify it.
-
-Dev Team Lead: That's estimated at 13 points. We can definitely take that on. What about the notification system redesign?
-
-Product Owner: That's P2. If we have capacity, yes. The requirement is to support email, push, and in-app notifications with user preferences.
-
-QA Lead: I'll need 2 days for regression testing on the onboarding flow. Can we get a test environment by Wednesday?
-
-Scrum Master: Noted. Action item for DevOps. Any blockers we should discuss?
-
-Dev Team Lead: We're waiting on the API specs from the backend team. That could delay the notification work.
-
-Product Owner: I'll follow up with them today. Let's commit to the onboarding wizard and tentatively plan for notifications.
-
-Scrum Master: Agreed. Decision: Sprint goal is completing the onboarding wizard with 95% test coverage.`,
-        duration: "45:00"
-      },
-      {
-        title: "Architecture Review - Microservices Migration",
-        date: "2024-10-05T14:00:00Z",
-        participants: ["CTO", "Principal Engineer", "Platform Team Lead", "Security Architect"],
-        transcript: `CTO: We need to finalize the architecture for phase 2 of our microservices migration. What's the recommendation?
-
-Principal Engineer: Based on our analysis, we should prioritize the user service and order service. They're the most critical and have the most technical debt.
-
-Platform Team Lead: For infrastructure, I recommend Kubernetes on AWS EKS. It gives us the scalability we need and team expertise exists.
-
-Security Architect: Key requirement: all service-to-service communication must use mTLS. Zero trust architecture is non-negotiable.
-
-CTO: Understood. What's the timeline looking like?
-
-Principal Engineer: Realistic estimate is 6 months for both services with proper testing. We could do user service in 3 months if we focus there first.
-
-Platform Team Lead: We need to migrate the database first. That's a prerequisite. Estimated 4 weeks for PostgreSQL migration from Oracle.
-
-CTO: Decision: Let's phase this. Month 1: Database migration. Months 2-4: User service. Months 5-6: Order service.
-
-Security Architect: I'll need to conduct security review at each phase gate. Non-negotiable requirement before production deployment.
-
-CTO: Agreed. Document these requirements and circulate for stakeholder approval by end of week.`,
-        duration: "60:00"
-      }
-    ];
   }
 }
 
